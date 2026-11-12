@@ -1,0 +1,21 @@
+# Render Blueprint — creates the web service in one step (Render → New → Blueprint).
+# The database lives on Neon (free PostgreSQL); its address is entered once as DATABASE_URL.
+services:
+  - type: web
+    name: daily-closing
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY # Render terminates HTTPS in front of the app
+        value: "1"
+      - key: TZ # dates and the work day follow Saudi time
+        value: Asia/Riyadh
+      - key: DATABASE_URL # asked for when the Blueprint is created; never stored in GitHub
+        sync: false

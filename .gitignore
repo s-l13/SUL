@@ -1,0 +1,10 @@
+# never upload data, secrets or build output
+node_modules/
+data/
+*.db
+*.db-wal
+*.db-shm
+*.tar.gz
+*.zip
+.env
+.env.*
