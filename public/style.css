@@ -299,6 +299,8 @@ tr.hidden-row td.row-acts { opacity: 1; }
 .c-logo { display: block; margin: 0 auto 6px; max-height: 70px; max-width: 160px; object-fit: contain; }
 .c-name { font-weight: 700; font-size: 19px; margin-bottom: 4px; }
 .c-date { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 4px 12px; font-size: 14px; }
+label.c-day { flex-direction: row; cursor: pointer; }
+.c-day input { border: 0; background: transparent; color: var(--text); font: inherit; font-weight: 700; padding: 0 2px; width: auto; min-height: 0; box-shadow: none; }
 .c-tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .c-tabs button { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 10px; border-radius: var(--radius); border: 2px solid var(--border); background: var(--surface); font-size: 16px; font-weight: 600; color: var(--muted); cursor: pointer; transition: border-color .15s, background .15s; }
 .c-tabs button .t-ic { width: 46px; height: 46px; border-radius: 13px; background: var(--surface-3); display: grid; place-items: center; }
@@ -509,3 +511,8 @@ tr.hidden-row td.row-acts { opacity: 1; }
   .rep-head, .kpi.accent, .rl.hl, .rl.bad, .chan i, .badge, .rep-card > h4 { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .rep-grid { grid-template-columns: 1fr 1fr; }
 }
+/* account type in the user form */
+.role-pick { display: grid; gap: 8px; }
+label.role-opt { align-items: flex-start; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; cursor: pointer; }
+.role-opt > span { display: flex; flex-direction: column; gap: 3px; }
+.role-opt:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }

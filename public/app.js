@@ -112,6 +112,11 @@ const logoURL = (b) => b && b.logo_v ? `/api/b/${b.id}/logo?v=${b.logo_v}` : nul
 const logoImg = (b, cls = 'blogo') => logoURL(b) ? `<img class="${cls}" src="${logoURL(b)}" alt="">` : '';
 const curBiz = () => S.me && S.me.businesses.find(x => x.id === S.bid);
 const can = (p) => !!S.meta && S.meta.permissions.includes(p);
+// the business's current work day (a closing after midnight still belongs to the previous day)
+const wd = () => (S.meta && S.meta.work_date) || S.me.today;
+// role shown for a user: owner (whole system) / business manager (every permission on the business) / cashier / user
+const roleName = (isAdmin, perms) => isAdmin ? T("مالك النظام") : Object.keys(S.me.permissions).every(k => perms.includes(k)) ? T("مدير النشاط")
+  : perms.length && perms.every(k => ['purchases_add', 'shift_manage'].includes(k)) ? T("كاشير") : T("مستخدم");
 
 async function api(path, opts = {}) {
   const res = await fetch('/api' + path, {
@@ -249,7 +254,7 @@ function refreshHeaderLogo() { const el = $('#hLogo'); if (el) el.outerHTML = bi
 
 function renderShell() {
   const bs = S.me.businesses, simple = isSimple();
-  const role = S.me.user.is_admin ? T("مدير") : simple ? T("كاشير") : T("مستخدم");
+  const role = roleName(S.me.user.is_admin, S.meta ? S.meta.permissions : []);
   const bizSel = bs.length > 1 ? `<select id="bizSel" class="biz-sel">${opt(bs, S.bid)}</select>` : '';
   $('#app').innerHTML = `<div class="layout ${simple ? 'simple' : ''}">
     <aside class="side" id="side">
@@ -274,7 +279,7 @@ function renderShell() {
         <button class="icon-btn menu-btn" id="bMenu" title="${T("القائمة")}">${icon('menu')}</button>
         ${simple ? `<div class="biz-mini">${bizLogoBox(curBiz())}<b>${esc(T(curBiz()?.name || ''))}</b></div>${bizSel}` : `<div class="crumb" id="crumb"></div>`}
         <div class="spacer"></div>
-        <span class="chip">${fmtDate(S.me.today)}</span>
+        <span class="chip">${fmtDate(wd())}</span>
         ${themeBtn()}
         ${simple ? `<button class="icon-btn" id="bLook2" title="${T("المظهر")}">${icon('palette')}</button>${langBtn('icon-btn')}<button class="icon-btn danger" id="bOut2" title="${T("خروج")}">${icon('logout')}</button>` : ''}
       </header>
@@ -475,7 +480,7 @@ function txFormHTML(opts = {}) {
       <label data-f="invoice">${T("رقم الفاتورة")}<input name="invoice_no"></label>
       <label data-f="method">${T("طريقة الدفع")}<select name="payment_method"></select></label>
       <label data-f="creditor">${T("الدائن / المورد")}<select name="creditor_id"><option value="">— ${T("اختر")} —</option>${opt(S.meta.creditors.filter(c => c.active))}</select></label>
-      <label data-f="date">${T("التاريخ")}<input type="date" name="date" value="${S.me.today}"></label>
+      <label data-f="date">${T("التاريخ")}<input type="date" name="date" value="${wd()}"></label>
       <label class="full">${T("ملاحظة / البيان")}<input name="description"></label>
     </div>
     <div data-f="items" style="margin-top:12px"><label class="check"><input type="checkbox" data-items-toggle> ${T("تفصيل الفاتورة بالأصناف (يُحسب المبلغ تلقائياً)")}</label>
@@ -583,7 +588,7 @@ VIEWS.home = async (el) => {
   const t = d.today, mo = d.month;
   const max = Math.max(1, ...d.last7.map(x => Math.max(x.sales, x.out)));
   el.innerHTML = `
-  ${pageHead('home', esc(T(S.meta.business.name)), fmtDate(S.me.today), `<a class="btn primary" href="#/shift">${icon('receipt')}${T("المشتريات والإقفال")}</a>`)}
+  ${pageHead('home', esc(T(S.meta.business.name)), fmtDate(wd()), `<a class="btn primary" href="#/shift">${icon('receipt')}${T("المشتريات والإقفال")}</a>`)}
   ${d.openShift ? `<div class="banner info">${icon('clock')}<span class="grow">${T("يوم العمل الحالي لم يُقفل بعد")} — <span class="small">${T("مبيعاته تُحتسب عند الإقفال")}</span></span></div>` : ''}
   ${d.pending_cash ? `<div class="banner warn">${icon('cash')}<span class="grow">${T("يوجد")} <b>${d.pending_cash}</b> ${T("إقفال بانتظار استلام النقد من الكاشير")}</span><a class="btn sm" href="#/shifts">${T("استلام الآن")}</a></div>` : ''}
   <div class="grid kpis">
@@ -621,17 +626,24 @@ const lsGet = (k, d) => { try { return localStorage.getItem(k) || d; } catch { r
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { } };
 
 async function vCashier(el) {
-  const d = await bapi('/shifts/current');
+  // past days: a user with that permission picks an earlier work day and records its purchases / sales
+  const canPast = can('past_days');
+  const day = canPast && vCashier.day && vCashier.day < wd() ? vCashier.day : null;
+  const d = day ? await bapi('/shifts/day?date=' + day) : await bapi('/shifts/current');
+  const done = day && d.shift && d.shift.closed_at; // that past day already has its closing figures
   const sh = d.shift, txs = sh ? sh.transactions.slice().reverse() : [];
   const canBuy = can('purchases_add'), canClose = can('shift_manage');
   let tab = vCashier.tab && ((vCashier.tab === 'buy' && canBuy) || (vCashier.tab === 'close' && canClose)) ? vCashier.tab : (canBuy ? 'buy' : 'close');
   const mode = lsGet('buyMode', 'total');
   const reload = (t) => { vCashier.tab = t; vCashier(el); };
+  const val = (k) => done ? d.shift[k] : '';
+  const appVal = (id) => { const a = done && d.shift.apps.find(x => x.app_id === id); return a && a.amount ? a.amount : ''; };
   const counts = !!S.meta.business.cashier_counts;
   const apps = S.meta.apps.filter(a => a.active);
   const out = sh ? sh.drawer_out : 0;
   el.innerHTML = `<div class="cashier">
-    <div class="c-head">${logoImg(S.meta.business, 'c-logo')}<div class="c-name">${esc(T(S.meta.business.name))}</div><span class="c-date">${icon('calendar')}${T("يوم العمل")} <b>${fmtDate(sh?.date || d.work_date)}</b></span></div>
+    <div class="c-head">${logoImg(S.meta.business, 'c-logo')}<div class="c-name">${esc(T(S.meta.business.name))}</div>${S.meta.business.open_time ? `<div class="small muted" style="margin-bottom:6px;display:inline-flex;align-items:center;gap:5px">${icon('clock')}${T("الدوام")}${timeLabel(S.meta.business.open_time)} – ${timeLabel(S.meta.business.close_time)}</div>` : ''}${canPast ? `<label class="c-date c-day">${icon('calendar')}${T("يوم العمل")} <input type="date" id="cDay" max="${wd()}" value="${day || wd()}"></label>` : `<span class="c-date">${icon('calendar')}${T("يوم العمل")} <b>${fmtDate(sh?.date || d.work_date)}</b></span>`}</div>
+    ${day ? `<div class="banner warn">${icon('history')}<span class="grow">${T("أنت تُدخل بيانات يوم سابق:")} <b>${fmtDate(day)}</b>${done ? ` — ${T("هذا اليوم مُقفل، ويمكنك تعديل أرقامه وإضافة مشتريات له")}` : ''}</span><button type="button" class="btn sm" id="cToday">${T("العودة لليوم الحالي")}</button></div>` : ''}
     <div class="c-tabs">
       ${canBuy ? `<button data-tab="buy" class="${tab === 'buy' ? 'on' : ''}"><span class="t-ic">${icon('cart')}</span>${T("المشتريات")}</button>` : ''}
       ${canClose ? `<button data-tab="close" class="${tab === 'close' ? 'on' : ''}"><span class="t-ic">${icon('lock')}</span>${T("إقفال اليوم")}</button>` : ''}
@@ -642,31 +654,34 @@ async function vCashier(el) {
       <p class="muted small" style="margin:-6px 0 12px">${BUY_MODES.find(m => m[0] === mode)[2]}</p>
       <form id="fBuy" autocomplete="off">${buyFormHTML(mode)}</form>
     </section>
-    <section class="card"><div class="card-head"><h3>${icon('receipt')}${T("مشتريات اليوم")}</h3><span class="badge muted">${txs.length}</span><b>${M(out)}</b></div>
+    <section class="card"><div class="card-head"><h3>${icon('receipt')}${day ? T("مشتريات هذا اليوم") : T("مشتريات اليوم")}</h3><span class="badge muted">${txs.length}</span><b>${M(out)}</b></div>
       ${txs.length ? txs.map(t => `<div class="c-item"><div class="ci-ic">${icon(t.items && t.items.length ? 'package' : 'receipt')}</div><div style="flex:1;min-width:0"><b>${M(t.amount)}</b>
         <div class="small muted">${esc(t.supplier || t.description || T("بدون اسم"))}${t.invoice_no ? (" · " + T("فاتورة") + " ") + esc(t.invoice_no) : ''} · ${timeOf(t.created_at)}</div>${itemsHTML(t.items)}</div>
         ${t.created_by === S.me.user.id ? `<button class="icon-btn danger" data-del="${t.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</div>`).join('') : ("<p class=\"muted center\">" + T("لم تُسجّل مشتريات اليوم بعد") + "</p>")}
     </section>` : `
     <section class="card"><form id="fCl" autocomplete="off">
       <h3>${icon('trendUp')}${T("مبيعات اليوم")}</h3>
-      <label class="big"><span class="lbl-ic">${icon('cash')}${T("كاش")}</span><input name="cash_sales" type="number" step="0.01" min="0" inputmode="decimal" required></label>
-      <label class="big"><span class="lbl-ic">${icon('card')}${T("شبكة")}</span><input name="card_sales" type="number" step="0.01" min="0" inputmode="decimal" required></label>
+      <label class="big"><span class="lbl-ic">${icon('cash')}${T("كاش")}</span><input name="cash_sales" type="number" step="0.01" min="0" inputmode="decimal" required value="${val('cash_sales')}"></label>
+      <label class="big"><span class="lbl-ic">${icon('card')}${T("شبكة")}</span><input name="card_sales" type="number" step="0.01" min="0" inputmode="decimal" required value="${val('card_sales')}"></label>
       <div class="sec-title">${icon('truck')}<span class="grow">${T("تطبيقات التوصيل")}</span>${can('settings_manage') ? `<a class="btn sm ghost" href="#/settings/apps">${icon('sliders')}${T("إضافة / تعديل / إخفاء")}</a>` : ''}</div>
-      ${apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"></label>`).join('') || ("<p class=\"muted small\">" + T("لا توجد تطبيقات ظاهرة") + "</p>")}
-      <label><span>${T("عدد الطلبات")} <span class="opt">${T("(اختياري)")}</span></span><input name="orders_count" type="number" min="0" step="1" inputmode="numeric"></label>
-      ${counts ? `<label class="big">${T("النقد الموجود في الدرج")}<input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" required></label>` : ''}
-      <label><span>${T("ملاحظات")} <span class="opt">${T("(اختياري)")}</span></span><input name="notes"></label>
+      ${apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0" value="${appVal(a.id)}"></label>`).join('') || ("<p class=\"muted small\">" + T("لا توجد تطبيقات ظاهرة") + "</p>")}
+      <label><span>${T("عدد الطلبات")} <span class="opt">${T("(اختياري)")}</span></span><input name="orders_count" type="number" min="0" step="1" inputmode="numeric" value="${done && d.shift.orders_count ? d.shift.orders_count : ''}"></label>
+      ${day ? `<label><span>${T("النقد المستلم فعلياً")} <span class="opt">${T("(اختياري)")}</span></span><input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" value="${done && d.shift.counted_at ? d.shift.counted_cash : ''}"></label>` : counts ? `<label class="big">${T("النقد الموجود في الدرج")}<input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" required></label>` : ''}
+      <label><span>${T("ملاحظات")} <span class="opt">${T("(اختياري)")}</span></span><input name="notes" value="${esc(done ? d.shift.notes || '' : '')}"></label>
       <div class="io" id="io"></div>
-      <button class="btn primary block">${icon('lock')}${T("إقفال اليوم")}</button>
+      <button class="btn primary block">${icon('lock')}${done ? T("حفظ تعديل الإقفال") : T("إقفال اليوم")}</button>
     </form></section>
-    ${d.last_closed ? `<p class="muted small center">${T("آخر إقفال:")} ${fmtDate(d.last_closed.date)} — ${esc(d.last_closed.closed_by_name || '')} ${T("الساعة")} ${timeOf(d.last_closed.closed_at)}</p>` : ''}`}
+    ${!day && d.last_closed ? `<p class="muted small center">${T("آخر إقفال:")} ${fmtDate(d.last_closed.date)} — ${esc(d.last_closed.closed_by_name || '')} ${T("الساعة")} ${timeOf(d.last_closed.closed_at)}</p>` : ''}`}
   </div>`;
   $$('[data-tab]', el).forEach(b => b.onclick = () => reload(b.dataset.tab));
+  const di = $('#cDay');
+  if (di) di.onchange = () => { if (di.value && di.value > wd()) { di.value = day || wd(); return toast(T("لا يمكن اختيار يوم بعد يوم العمل الحالي"), 'err'); } vCashier.day = di.value && di.value < wd() ? di.value : null; reload(tab); };
+  const bt = $('#cToday'); if (bt) bt.onclick = () => { vCashier.day = null; reload(tab); };
   $$('[name=bm]', el).forEach(r => r.onchange = () => { lsSet('buyMode', r.value); reload('buy'); });
   $$('[data-del]', el).forEach(b => b.onclick = () => deleteTx(txs.find(t => t.id == b.dataset.del), () => reload('buy')));
 
   const fb = $('#fBuy');
-  if (fb) bindBuyForm(fb, mode, async () => { await loadMeta(); reload('buy'); });
+  if (fb) bindBuyForm(fb, mode, async () => { await loadMeta(); reload('buy'); }, day);
 
   const fc = $('#fCl');
   if (!fc) return;
@@ -699,10 +714,12 @@ async function vCashier(el) {
       <div class="r"><span>${T("المشتريات")}</span>${M(out)}</div>
       ${showCash ? `<div class="r t"><span>${T("الكاش بعد المشتريات")}</span>${M(r2(x.cash - out))}</div>` : ''}
       ${counts ? `<div class="r"><span>${T("النقد في الدرج")}</span>${M(fc.counted_cash.value)}</div>` : ''}</div>
-      <p class="muted small">${T("تأكد من الأرقام — لا يمكنك تعديلها بعد الإقفال")}.</p>`, T("نعم، أقفل اليوم"));
+      <p class="muted small">${day ? T("يوم العمل") + ' ' + fmtDate(day) : T("تأكد من الأرقام — لا يمكنك تعديلها بعد الإقفال") + '.'}</p>`, done ? T("نعم، احفظ") : T("نعم، أقفل اليوم"));
     if (!ok) return;
     busy($('button.primary', fc), async () => {
-      await bapi('/shifts/close-current', { method: 'POST', body: { ...formObj(fc), apps: x.appRows.map(({ app_id, amount }) => ({ app_id, amount })) } });
+      const body = { ...formObj(fc), apps: x.appRows.map(({ app_id, amount }) => ({ app_id, amount })) };
+      if (day) await bapi('/shifts/close-day', { method: 'POST', body: { ...body, date: day } });
+      else await bapi('/shifts/close-current', { method: 'POST', body });
       await loadMeta();
       modal(T("تم الإقفال"), `<div class="result"><div class="res-ic">${icon('check')}</div><p>${T("تم إقفال اليوم وتسجيل المبيعات بنجاح")}.</p>
         <div class="summary-box" style="text-align:start"><div class="r"><span>${T("الداخل")}</span>${M(x.total)}</div><div class="r"><span>${T("الخارج")}</span>${M(out)}</div><div class="r t"><span>${T("الصافي")}</span>${M(r2(x.total - out))}</div></div></div>
@@ -729,8 +746,8 @@ function buyFormHTML(mode) {
     <label><span>${T("ملاحظة")} <span class="opt">${T("(اختياري)")}</span></span><input name="description" placeholder="${T("مثال: خضار، غاز، أكياس…")}"></label>
     <button class="btn primary block">${T("حفظ")}</button>`;
 }
-function bindBuyForm(f, mode, done) {
-  const base = { type: 'purchase', payment_method: 'drawer' };
+function bindBuyForm(f, mode, done, day) {
+  const base = { type: 'purchase', payment_method: 'drawer', ...(day ? { day } : {}) };
   if (mode === 'multi') {
     const box = $('#mRows', f);
     const calc = () => {
@@ -794,7 +811,7 @@ VIEWS.shift = (el) => vCashier(el);
 
 /* ═════════════════════════ transactions list ═════════════════════════ */
 VIEWS.tx = async (el) => {
-  const st = VIEWS.tx.st || (VIEWS.tx.st = { from: S.me.today.slice(0, 8) + '01', to: S.me.today, type: '', method: '', q: '', deleted: '' });
+  const st = VIEWS.tx.st || (VIEWS.tx.st = { from: wd().slice(0, 8) + '01', to: wd(), type: '', method: '', q: '', deleted: '' });
   el.innerHTML = `
   ${pageHead('list', T("الحركات المالية"), '', `<button class="btn" id="bCsv">${icon('download')}${T("تصدير")} Excel</button>${can('purchases_add') || can('finance_manage') ? `<button class="btn primary" id="bNew">${icon('plus')}${T("حركة جديدة")}</button>` : ''}`)}
   <section class="card"><form id="fFilt" class="fgrid">
@@ -833,7 +850,7 @@ VIEWS.tx = async (el) => {
 /* ═════════════════════════ expenses ═════════════════════════ */
 // rent, salaries, electricity… : list, totals by category, quick add
 VIEWS.expenses = async (el) => {
-  const st = VIEWS.expenses.st || (VIEWS.expenses.st = { from: S.me.today.slice(0, 8) + '01', to: S.me.today, category_id: '' });
+  const st = VIEWS.expenses.st || (VIEWS.expenses.st = { from: wd().slice(0, 8) + '01', to: wd(), category_id: '' });
   const canAdd = can('finance_manage') || can('purchases_add');
   const cats = S.meta.categories.filter(c => c.kind === 'expense');
   el.innerHTML = `${pageHead('fileText', T("المصروفات"), T("الرواتب والإيجار والكهرباء وغيرها"), `${canAdd ? `<button class="btn primary" id="bNewExp">${icon('plus')}${T("مصروف جديد")}</button>` : ''}`)}
@@ -876,7 +893,7 @@ const countBadge = (s) => s.status === 'open' ? ("<span class=\"badge info\">" +
 const shiftTotal = (s) => r2(s.cash_sales + s.card_sales + s.app_sales);
 
 VIEWS.shifts = async (el) => {
-  const st = VIEWS.shifts.st || (VIEWS.shifts.st = { from: addDays(S.me.today, -30), to: S.me.today });
+  const st = VIEWS.shifts.st || (VIEWS.shifts.st = { from: addDays(wd(), -30), to: wd() });
   el.innerHTML = `${pageHead('clipboard', T("سجل الإقفالات"), T("كل يوم مقفل: المبيعات والنقد ونتيجة الجرد"))}
   <section class="card"><form id="fF" class="row"><label>${T("من")}<input type="date" name="from" value="${st.from}"></label><label>${T("إلى")}<input type="date" name="to" value="${st.to}"></label></form></section>
   <section class="card" id="shList"></section>`;
@@ -980,7 +997,7 @@ const F_L = {
   type: T("النوع"), payment_method: T("طريقة الدفع"), amount: T("المبلغ"), fee: T("العمولة"), date: T("التاريخ"), category: T("التصنيف"), supplier: T("المورد"),
   invoice_no: T("رقم الفاتورة"), creditor: T("الدائن"), app: T("التطبيق"), description: T("الملاحظة"), cash_sales: T("الكاش"), card_sales: T("الشبكة"),
   orders_count: T("عدد الطلبات"), counted_cash: T("النقد المستلم"), cash_with_staff: T("نقد عند الموظفين"), difference: T("نتيجة الجرد"), notes: T("الملاحظات"),
-  logo: T("الشعار"), card_fee_pct: T("رسوم البطاقة %"), cash_float: T("العهدة"), opening_balance: T("الرصيد الافتتاحي"), cashier_counts: T("الكاشير يعدّ الدرج"), day_start_hour: T("بداية يوم العمل (ساعة)"),
+  logo: T("الشعار"), card_fee_pct: T("رسوم البطاقة %"), cash_float: T("العهدة"), opening_balance: T("الرصيد الافتتاحي"), cashier_counts: T("الكاشير يعدّ الدرج"), day_start_hour: T("بداية يوم العمل (ساعة)"), open_time: T("وقت الافتتاح"), close_time: T("وقت الإغلاق"),
   debt: T("الدين المتبقي"), movements: T("الحركات المحذوفة معه"), name: T("الاسم"), kind: T("النوع"), opening_receivable: T("الآجل الافتتاحي"), active: T("فعّال"),
 };
 const AUDIT_ACTIONS = {
@@ -1101,7 +1118,7 @@ function debtsTable(dp, startLabel) {
 }
 
 async function dailyReport(box) {
-  const date = dailyReport.date || S.me.today;
+  const date = dailyReport.date || wd();
   box.innerHTML = `<div class="row no-print" style="justify-content:center;margin-bottom:16px">
     <button class="btn" data-d="-1">${icon('chevL')}${T("اليوم السابق")}</button><input type="date" id="rDate" value="${date}">
     <button class="btn" data-d="1">${T("اليوم التالي")}${icon('chevR')}</button></div><div id="sheet"><div class="empty">${T("جاري التحميل…")}</div></div>`;
@@ -1184,8 +1201,8 @@ function barChart(days) {
 }
 
 async function periodReport(box) {
-  const st = periodReport.st || (periodReport.st = { from: S.me.today.slice(0, 8) + '01', to: S.me.today });
-  const t = S.me.today, lmEnd = addDays(t.slice(0, 8) + '01', -1);
+  const st = periodReport.st || (periodReport.st = { from: wd().slice(0, 8) + '01', to: wd() });
+  const t = wd(), lmEnd = addDays(t.slice(0, 8) + '01', -1);
   box.innerHTML = `<section class="card no-print"><form id="fP" class="row">
     <label>${T("من")}<input type="date" name="from" value="${st.from}"></label><label>${T("إلى")}<input type="date" name="to" value="${st.to}"></label>
     <span class="row" style="align-self:end"><button type="button" class="btn sm" data-r="${addDays(t, -6)}|${t}">${T("آخر 7 أيام")}</button>
@@ -1285,7 +1302,7 @@ function payDebt(c, type, after) {
     </div>
     <div class="fgrid">
       ${wo ? '' : `<label>${T("طريقة الدفع")}<select name="payment_method"><option value="company">${S.me.methods.company}</option><option value="drawer">${S.me.methods.drawer}</option></select></label>`}
-      <label>${T("التاريخ")}<input type="date" name="date" value="${S.me.today}"></label>
+      <label>${T("التاريخ")}<input type="date" name="date" value="${wd()}"></label>
       <label class="full">${T("ملاحظة")}<input name="description" placeholder="${wo ? T("سبب الإسقاط") : ''}"></label>
     </div>
     <div class="io" id="payIO"></div>
@@ -1435,10 +1452,11 @@ VIEWS.settings = async (el) => {
     <label>${T("نسبة رسوم البطاقة %")}<input name="card_fee_pct" type="number" step="0.01" min="0" value="${b.card_fee_pct}"></label>
     <label>${T("العهدة الثابتة في الدرج")}<input name="cash_float" type="number" step="0.01" min="0" value="${b.cash_float}"></label>
     ${b.opening_balance !== undefined ? `<label>${T("رصيد الشركة الافتتاحي")}<input name="opening_balance" type="number" step="0.01" value="${b.opening_balance}"></label>` : ''}
-    <label>${T("بداية يوم العمل (الساعة)")}<input name="day_start_hour" type="number" min="0" max="12" step="1" value="${b.day_start_hour}"></label>
+    <label>${T("وقت الافتتاح")}<input name="open_time" type="time" step="900" value="${b.open_time || ''}"></label>
+    <label>${T("وقت الإغلاق")}<input name="close_time" type="time" step="900" value="${b.close_time || ''}"></label>
     <label class="check full"><input type="checkbox" name="cashier_counts" ${b.cashier_counts ? 'checked' : ''}> ${T("الكاشير يعدّ النقد في الدرج عند الإقفال (إن لم تُفعّلها: المحاسب أو المالك يستلم النقد ويسجّله من «سجل الإقفالات»)")}</label>
     <div style="align-self:end"><button class="btn primary">${T("حفظ")}</button></div></form>
-    <p class="hint">${T("بداية يوم العمل: لو كانت 5، فالإقفال الساعة 2 فجراً يُحسب على اليوم السابق")}.</p>
+    <p class="hint" id="dayHint"></p>
     <p class="hint">${T("الرصيد الافتتاحي")} = ${T("رصيد الشركة يوم بدء استخدام النظام (بدون الآجل لدى التطبيقات، فهو يُدخل لكل تطبيق على حدة)")}.</p></section>
   <section class="card" id="apps"><div class="card-head"><h3>${icon('truck')}${T("تطبيقات التوصيل")}</h3><button class="btn primary sm" data-add="apps">${icon('plus')}${T("إضافة تطبيق")}</button></div>
     <p class="muted small" style="margin:0 0 10px">${T("التطبيقات الظاهرة تظهر للكاشير في «إقفال اليوم». المخفي لا يظهر، لكن تبقى مبيعاته السابقة ومستحقاته محفوظة في التقارير")}.</p>
@@ -1453,6 +1471,15 @@ VIEWS.settings = async (el) => {
   </div>`;
   const reload = () => VIEWS.settings(el);
   bindLogoBox($('#logoBox'), reload);
+  // live explanation of where the work day ends, from the opening / closing times
+  const fs_ = $('#fSet');
+  const dayHint = () => {
+    const o = fs_.open_time.value, c = fs_.close_time.value;
+    $('#dayHint').innerHTML = o && c && o !== c
+      ? `${icon('clock')}<span>${T("يوم العمل من")} <b>${timeLabel(o)}</b> ${T("إلى")} <b>${timeLabel(c)}</b>. ${T("كل ما يُسجّل حتى الساعة")} <b>${minLabel(cutoffOf(o, c))}</b> ${T("يُحسب على يوم الافتتاح السابق (حتى لو تأخر الإقفال)، وما بعدها يُحسب على اليوم الجديد")}.</span>`
+      : `${icon('clock')}<span>${T("حدّد وقت الافتتاح ووقت الإغلاق ليحسب النظام يوم العمل بدقة في الإقفال والمشتريات والتقارير")}. ${T("حالياً يبدأ اليوم الجديد الساعة")} ${minLabel((b.day_start_hour || 0) * 60)}.</span>`;
+  };
+  fs_.addEventListener('input', dayHint); dayHint();
   $('#fSet').onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => { await bapi('/settings', { method: 'PUT', body: { ...formObj(e.target), cashier_counts: e.target.cashier_counts.checked ? 1 : 0 } }); toast(T("تم الحفظ"), 'ok'); await refreshBusinesses(); reload(); }); };
   $$('[data-add]', el).forEach(btn => btn.onclick = () => {
     const [key, kind] = btn.dataset.add.split(':');
@@ -1475,12 +1502,18 @@ VIEWS.settings = async (el) => {
   if (location.hash.includes('apps')) setTimeout(() => $('#apps')?.scrollIntoView({ behavior: 'smooth' }), 100);
 };
 
+// "16:30" → "4:30 م"
+const timeLabel = (s) => { if (!s) return ''; let [h, m] = s.split(':').map(Number); const pm = h >= 12; h = h % 12 || 12; return `${h}:${String(m).padStart(2, '0')} ${pm ? T("م") : T("ص")}`; };
+const minsOf = (s) => +s.slice(0, 2) * 60 + +s.slice(3, 5);
+const cutoffOf = (o, c) => { const gap = (minsOf(o) - minsOf(c) + 1440) % 1440; return (minsOf(c) + Math.floor(gap / 2)) % 1440; };
+const minLabel = (m) => timeLabel(`${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`);
+
 /* ═════════════════════════ admin ═════════════════════════ */
 const PRESETS = {
   'كاشير': ['purchases_add', 'shift_manage'],
   'محاسب — عرض فقط': ['tx_view_all', 'reports_view', 'balance_view', 'audit_view', 'shift_view_expected'],
   'محاسب — عرض وتعديل': ['purchases_add', 'tx_view_all', 'tx_edit', 'shift_reopen', 'finance_manage', 'reports_view', 'balance_view', 'audit_view', 'shift_view_expected'],
-  'كل الصلاحيات': null,
+  'مدير النشاط': null,
 };
 VIEWS.admin = async (el, [tab = 'users']) => {
   el.innerHTML = `<div class="page-head"><div class="ph-ic">${icon('users')}</div><div class="ph-t"><h1>${T("المستخدمون والأنشطة")}</h1></div>
@@ -1497,8 +1530,8 @@ async function adminUsers(box) {
   const bname = (id) => bizs.find(b => b.id === id)?.name || '';
   box.innerHTML = `<section class="card"><div class="card-head"><h3>${icon('users')}${T("المستخدمون")}</h3><button class="btn primary" id="bAdd">${icon('plus')}${T("مستخدم جديد")}</button></div>
     <div class="tbl-wrap"><table><thead><tr><th>${T("الاسم")}</th><th>${T("اسم الدخول")}</th><th>${T("الدور")}</th><th>${T("الأنشطة")}</th><th>${T("الحالة")}</th><th></th></tr></thead><tbody>
-    ${users.map(u => `<tr><td>${esc(T(u.name))}</td><td class="num">${esc(u.username)}</td><td>${u.is_admin ? ("<span class=\"badge info\">" + T("مدير") + "</span>") : T("مستخدم")}</td>
-      <td class="small">${u.is_admin ? T("كل الأنشطة") : u.access.map(a => `${esc(bname(a.business_id))} <span class="muted">(${a.permissions.length} ${T("صلاحية")})</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
+    ${users.map(u => `<tr><td>${esc(T(u.name))}</td><td class="num">${esc(u.username)}</td><td>${u.is_admin ? ("<span class=\"badge info\">" + T("مالك النظام") + "</span>") : [...new Set(u.access.map(a => roleName(false, a.permissions)))].join(' / ') || T("مستخدم")}</td>
+      <td class="small">${u.is_admin ? T("كل الأنشطة") : u.access.map(a => `${esc(T(bname(a.business_id)))} <span class="muted">(${roleName(false, a.permissions)})</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
       <td>${u.active ? ("<span class=\"badge pos\">" + T("فعّال") + "</span>") : ("<span class=\"badge muted\">" + T("موقوف") + "</span>")}</td><td><button class="btn sm" data-u="${u.id}">${T("تعديل")}</button></td></tr>`).join('')}
     </tbody></table></div></section>`;
   const reload = () => adminUsers(box);
@@ -1512,17 +1545,22 @@ function userModal(u, bizs, after) {
     <div class="fgrid"><label>${T("الاسم")}<input name="name" required value="${esc(u?.name || '')}"></label>
     <label>${T("اسم الدخول")}<input name="username" required ${u ? 'readonly' : ''} value="${esc(u?.username || '')}" dir="ltr"></label>
     <label>${u ? T("كلمة مرور جديدة (اتركها فارغة للإبقاء)") : T("كلمة المرور")}<input name="password" type="text" ${u ? '' : 'required'} minlength="6" dir="ltr" autocomplete="off"></label></div>
-    <div class="row" style="margin:14px 0"><label class="check"><input type="checkbox" name="is_admin" ${u?.is_admin ? 'checked' : ''}> ${T("مدير النظام (كل الصلاحيات على كل الأنشطة)")}</label>
-    <label class="check"><input type="checkbox" name="active" ${!u || u.active ? 'checked' : ''}> ${T("الحساب فعّال")}</label></div>
+    <h4 style="margin:16px 0 8px">${T("نوع الحساب")}</h4>
+    <div class="role-pick">
+      <label class="check role-opt"><input type="radio" name="role" value="biz" ${u?.is_admin ? '' : 'checked'}><span><b>${T("موظف أو مدير نشاط")}</b><small class="muted">${T("يرى فقط الأنشطة التي تختارها له، وبالصلاحيات التي تحددها. لمدير النشاط اضغط «مدير النشاط»")}</small></span></label>
+      <label class="check role-opt"><input type="radio" name="role" value="owner" ${u?.is_admin ? 'checked' : ''}><span><b>${T("مالك النظام (صلاحية مطلقة)")}</b><small class="muted">${T("كل الأنشطة، وإنشاء المستخدمين والأنشطة، والنسخ الاحتياطي، والتصفير. اجعلها لك فقط")}</small></span></label>
+    </div>
+    <div class="row" style="margin:12px 0"><label class="check"><input type="checkbox" name="active" ${!u || u.active ? 'checked' : ''}> ${T("الحساب فعّال")}</label></div>
     <div id="permBox"><h4 style="margin:6px 0 10px">${T("الأنشطة والصلاحيات")}</h4>
     ${bizs.map(b => { const a = acc(b.id); return `<div class="perm-biz ${a ? '' : 'off'}" data-b="${b.id}">
       <div class="ph"><label class="check"><input type="checkbox" data-on ${a ? 'checked' : ''}> <b>${esc(T(b.name))}</b></label>
-        <span class="row presets">${Object.keys(PRESETS).map(p => `<button type="button" class="btn sm" data-preset="${p}">${p}</button>`).join('')}</span></div>
+        <span class="row presets">${Object.keys(PRESETS).map(p => `<button type="button" class="btn sm" data-preset="${p}">${T(p)}</button>`).join('')}</span></div>
       <div class="pl">${Object.entries(P).map(([k, l]) => `<label class="check small"><input type="checkbox" data-p="${k}" ${a?.permissions.includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>`; }).join('')}</div>
     <div class="mf"><button class="btn primary">${T("حفظ")}</button></div></form>`, { wide: true });
   const f = $('#fU', m.el);
-  const syncAdmin = () => { $('#permBox', f).hidden = f.is_admin.checked; };
-  f.is_admin.onchange = syncAdmin; syncAdmin();
+  const isOwner = () => f.querySelector('[name=role]:checked').value === 'owner';
+  const syncAdmin = () => { $('#permBox', f).hidden = isOwner(); };
+  $$('[name=role]', f).forEach(r => r.onchange = syncAdmin); syncAdmin();
   $$('[data-on]', f).forEach(c => c.onchange = () => c.closest('.perm-biz').classList.toggle('off', !c.checked));
   $$('[data-preset]', f).forEach(b => b.onclick = () => {
     const ps = PRESETS[b.dataset.preset] || Object.keys(P);
@@ -1530,8 +1568,9 @@ function userModal(u, bizs, after) {
   });
   f.onsubmit = (e) => {
     e.preventDefault();
+    if (isOwner() && !u?.is_admin && !confirm(T("تأكيد: هذا الحساب سيملك صلاحية مطلقة على كل النظام، مثل حسابك تماماً. متأكد؟"))) return;
     busy(e.submitter, async () => {
-      const body = { name: f.name.value, username: f.username.value, password: f.password.value, is_admin: f.is_admin.checked, active: f.active.checked,
+      const body = { name: f.name.value, username: f.username.value, password: f.password.value, is_admin: isOwner(), active: f.active.checked,
         access: $$('.perm-biz', f).filter(x => $('[data-on]', x).checked).map(x => ({ business_id: Number(x.dataset.b), permissions: $$('[data-p]:checked', x).map(c => c.dataset.p) })) };
       if (u) await api('/admin/users/' + u.id, { method: 'PUT', body }); else await api('/admin/users', { method: 'POST', body });
       m.close(); toast(T("تم الحفظ"), 'ok'); after();

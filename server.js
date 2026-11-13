@@ -51,7 +51,19 @@ const addDays = (s, n) => { const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d
 const isDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 const nowLocal = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 19).replace('T', ' '); };
 // restaurant work day: closing after midnight still belongs to the previous day
-const workDate = (b) => { const d = new Date(Date.now() - (b.day_start_hour || 0) * 3600e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
+const isTime = (s) => typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
+const mins = (s) => +s.slice(0, 2) * 60 + +s.slice(3, 5);
+// where one work day ends and the next begins (minutes after midnight):
+// with opening & closing times → the middle of the closed hours, so a late closing still belongs to its day
+// and a purchase made in the morning before opening belongs to the coming day
+function dayCutoff(b) {
+  if (isTime(b.open_time) && isTime(b.close_time)) {
+    const o = mins(b.open_time), c = mins(b.close_time), gap = (o - c + 1440) % 1440;
+    return (c + Math.floor(gap / 2)) % 1440;
+  }
+  return (b.day_start_hour || 0) * 60;
+}
+const workDate = (b) => { const d = new Date(Date.now() - dayCutoff(b) * 60e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
 const MAX_DATE = '9999-12-31';
 
 class HttpError extends Error { constructor(status, msg, vars) { super(msg); this.status = status; this.vars = vars; } }
@@ -87,6 +99,7 @@ const PERMISSIONS = {
   balance_view: 'عرض رصيد الشركة والديون',
   audit_view: 'عرض سجل التعديلات',
   settings_manage: 'إعدادات النشاط (التطبيقات، التصنيفات، الدائنين)',
+  past_days: 'إدخال وتعديل أيام سابقة (مبيعات ومشتريات بتاريخ قديم)',
 };
 const ALL_PERMS = Object.keys(PERMISSIONS);
 
@@ -211,7 +224,7 @@ async function makeBackup(label) {
 const admin = express.Router();
 admin.use(adminOnly);
 
-admin.get('/businesses', wrap(() => db.all('SELECT id, name, card_fee_pct, cash_float, opening_balance, active, created_at, cashier_counts, day_start_hour, logo_updated logo_v FROM businesses ORDER BY id')));
+admin.get('/businesses', wrap(() => db.all('SELECT id, name, card_fee_pct, cash_float, opening_balance, active, created_at, cashier_counts, day_start_hour, open_time, close_time, logo_updated logo_v FROM businesses ORDER BY id')));
 admin.post('/businesses', wrap(async (req) => {
   const { name, card_fee_pct = 0, cash_float = 0, opening_balance = 0 } = req.body || {};
   if (!name || !String(name).trim()) bad('اسم النشاط مطلوب');
@@ -516,7 +529,7 @@ async function dailySeries(b, from, to) {
 biz.get('/meta', wrap(async (req) => {
   const b = req.biz;
   return {
-    business: { id: b.id, name: b.name, logo_v: b.logo_updated, theme: b.theme ? JSON.parse(b.theme) : null, card_fee_pct: b.card_fee_pct, cash_float: b.cash_float, cashier_counts: b.cashier_counts, day_start_hour: b.day_start_hour,
+    business: { id: b.id, name: b.name, logo_v: b.logo_updated, theme: b.theme ? JSON.parse(b.theme) : null, card_fee_pct: b.card_fee_pct, cash_float: b.cash_float, cashier_counts: b.cashier_counts, day_start_hour: b.day_start_hour, open_time: b.open_time, close_time: b.close_time, day_cutoff: dayCutoff(b),
       opening_balance: req.can('balance_view') ? b.opening_balance : undefined },
     work_date: workDate(b),
     permissions: [...req.perms],
@@ -536,9 +549,13 @@ biz.put('/settings', need('settings_manage'), wrap(async (req) => {
     opening_balance: req.can('balance_view') ? pick('opening_balance', v => num(v) || 0) : b.opening_balance,
     cashier_counts: pick('cashier_counts', v => (v && v !== '0' && v !== 'false') ? 1 : 0),
     day_start_hour: pick('day_start_hour', v => Math.min(12, Math.max(0, parseInt(v) || 0))),
+    open_time: pick('open_time', v => { if (v === '' || v === null) return null; if (!isTime(v)) bad('وقت الافتتاح غير صحيح'); return v; }),
+    close_time: pick('close_time', v => { if (v === '' || v === null) return null; if (!isTime(v)) bad('وقت الإغلاق غير صحيح'); return v; }),
   };
-  await db.run('UPDATE businesses SET name=?, card_fee_pct=?, cash_float=?, opening_balance=?, cashier_counts=?, day_start_hour=? WHERE id=?',
-    after.name, after.card_fee_pct, after.cash_float, after.opening_balance, after.cashier_counts, after.day_start_hour, b.id);
+  if (!after.open_time !== !after.close_time) bad('أدخل وقت الافتتاح ووقت الإغلاق معاً');
+  if (after.open_time && after.open_time === after.close_time) bad('وقت الافتتاح والإغلاق متساويان');
+  await db.run('UPDATE businesses SET name=?, card_fee_pct=?, cash_float=?, opening_balance=?, cashier_counts=?, day_start_hour=?, open_time=?, close_time=? WHERE id=?',
+    after.name, after.card_fee_pct, after.cash_float, after.opening_balance, after.cashier_counts, after.day_start_hour, after.open_time, after.close_time, b.id);
   const before = Object.fromEntries(Object.keys(after).map(k => [k, b[k]]));
   await audit(b.id, req.user.id, 'settings_update', { before, after });
   return { ok: true };
@@ -647,7 +664,7 @@ biz.delete('/creditors/:id', need('finance_manage', 'settings_manage'), wrap(asy
 
 // ---------- summary (dashboard) ----------
 biz.get('/summary', need('balance_view'), wrap(async (req) => {
-  const b = req.biz, t = today();
+  const b = req.biz, t = workDate(b);
   const balance = await balanceAsOf(b, MAX_DATE);
   const receivables = await receivablesAsOf(b.id, MAX_DATE);
   const debts = await debtsAsOf(b.id, MAX_DATE);
@@ -657,7 +674,9 @@ biz.get('/summary', need('balance_view'), wrap(async (req) => {
     balance, receivables, debts, net_position: r2(balance - debts.total),
     today: await movement(b, t, t), month: await movement(b, t.slice(0, 8) + '01', t),
     openShift: os ? { ...os, opened_by_name: (await db.get('SELECT name FROM users WHERE id = ?', os.opened_by))?.name } : null,
-    pending_cash: (await db.get("SELECT COUNT(*) n FROM shifts WHERE business_id = ? AND status = 'closed' AND counted_at IS NULL", b.id)).n,
+    // days entered later from the "past days" page are not waiting for a cashier hand-over
+    pending_cash: (await db.all("SELECT date, opened_at FROM shifts WHERE business_id = ? AND status = 'closed' AND counted_at IS NULL", b.id))
+      .filter(s => String(s.opened_at).slice(0, 10) <= addDays(s.date, 1)).length,
     last7: Array.from({ length: 7 }, (_, i) => { const d = addDays(t, i - 6), x = series.get(d); return { date: d, sales: x ? x.sales : 0, out: x ? r2(x.purchases + x.expenses) : 0 }; }),
   };
 }));
@@ -686,6 +705,51 @@ async function getShift(req) {
   return s;
 }
 const showExpected = (req) => req.can('shift_view_expected') || req.can('reports_view');
+
+// ── past days: an authorised user records the purchases and sales of an earlier work day ──
+function pastDay(req, d) {
+  if (!req.can('past_days')) throw new HttpError(403, 'ليس لديك صلاحية لإدخال أيام سابقة');
+  if (!isDate(d)) bad('التاريخ غير صحيح');
+  if (d >= workDate(req.biz)) bad('اختر يوماً قبل يوم العمل الحالي');
+  return d;
+}
+const dayShift = (req, d) => db.get('SELECT * FROM shifts WHERE business_id = ? AND date = ? ORDER BY id DESC LIMIT 1', req.biz.id, d);
+// the day's record is created "closed" (no open shift that would catch today's invoices); sales are filled in on saving the closing
+async function ensureDayShift(req, d) {
+  const s = await dayShift(req, d);
+  if (s) return s;
+  const id = await db.insert("INSERT INTO shifts (business_id, date, status, opening_float, opened_by) VALUES (?,?,'closed',?,?)", req.biz.id, d, req.biz.cash_float, req.user.id);
+  await audit(req.biz.id, req.user.id, 'shift_open', { id, date: d, past: true });
+  return db.get('SELECT * FROM shifts WHERE id = ?', id);
+}
+biz.get('/shifts/day', wrap(async (req) => {
+  const d = pastDay(req, req.query.date);
+  const s = await dayShift(req, d);
+  return { shift: s ? await shiftView(req, s) : null, cash_float: req.biz.cash_float, work_date: d, past: true };
+}));
+biz.post('/shifts/close-day', wrap(async (req) => {
+  const x = req.body || {};
+  const d = pastDay(req, x.date);
+  const sales = await parseSales(req, x);
+  const count = parseCount(x);
+  const existing = await dayShift(req, d);
+  if (existing && existing.status === 'open') return closeShift(req, existing); // a day the cashier forgot to close
+  const before = existing && existing.closed_at ? await shiftSnap(existing.id) : null;
+  const id = await db.tx(async () => {
+    const s = await ensureDayShift(req, d);
+    await db.run(`UPDATE shifts SET closed_by=COALESCE(closed_by, ?), closed_at=COALESCE(closed_at, ?), cash_sales=?, card_sales=?, app_sales=?, orders_count=?, card_fee=?, notes=? WHERE id=?`,
+      req.user.id, nowLocal(), sales.cash_sales, sales.card_sales, sales.app_sales, sales.orders_count, r2(sales.card_sales * req.biz.card_fee_pct / 100),
+      String(x.notes ?? s.notes ?? '').slice(0, 1000), s.id);
+    if (count) await db.run('UPDATE shifts SET counted_cash=?, cash_with_staff=?, counted_by=?, counted_at=? WHERE id=?',
+      count.counted_cash, count.cash_with_staff, req.user.id, nowLocal(), s.id);
+    await saveAppSales(s.id, sales.apps);
+    await recomputeShift(s.id);
+    return s.id;
+  });
+  const after = await db.get('SELECT * FROM shifts WHERE id = ?', id);
+  await audit(req.biz.id, req.user.id, before ? 'shift_edit' : 'shift_close', { id, date: d, past: true, before: before || undefined, after: await shiftSnap(id) });
+  return { ok: true, id, date: d, total: r2(sales.cash_sales + sales.card_sales + sales.app_sales), expected: after.expected_cash, difference: count ? after.difference : null };
+}));
 
 biz.get('/shifts/current', wrap(async (req) => {
   const s = await openShift(req.biz.id);
@@ -786,8 +850,8 @@ biz.post('/shifts/:id/reopen', need('shift_reopen'), wrap(async (req) => {
 }));
 
 biz.get('/shifts', need('reports_view', 'shift_reopen'), wrap((req) => {
-  const from = isDate(req.query.from) ? req.query.from : addDays(today(), -30);
-  const to = isDate(req.query.to) ? req.query.to : today();
+  const from = isDate(req.query.from) ? req.query.from : addDays(workDate(req.biz), -30);
+  const to = isDate(req.query.to) ? req.query.to : workDate(req.biz);
   return db.all(`SELECT s.*, uo.name opened_by_name, uc.name closed_by_name FROM shifts s
     LEFT JOIN users uo ON uo.id = s.opened_by LEFT JOIN users uc ON uc.id = s.closed_by
     WHERE s.business_id = ? AND s.date BETWEEN ? AND ? ORDER BY s.date DESC, s.id DESC`, req.biz.id, from, to);
@@ -861,12 +925,15 @@ async function validateTx(req, x, existing) {
       const s = await db.get('SELECT * FROM shifts WHERE id = ?', existing.shift_id);
       if (s.status !== 'open' && !can('tx_edit')) bad('تم إقفال اليوم — لا يمكن تعديل الحركة');
       shift_id = s.id; date = s.date;
+    } else if (x.day) {
+      const s = await ensureDayShift(req, pastDay(req, x.day)); // an invoice of an earlier work day
+      shift_id = s.id; date = s.date;
     } else {
       const s = await ensureOpenShift(req); // all validation above passed — safe to auto-open
       shift_id = s.id; date = s.date;
     }
   } else {
-    date = isDate(x.date) ? x.date : today();
+    date = isDate(x.date) ? x.date : workDate(req.biz);
   }
   return {
     type, payment_method: method, amount: r2(amount), fee: r2(fee), category_id, creditor_id, app_id, shift_id, date,
@@ -893,6 +960,7 @@ async function insertTx(req, t) {
   const id = await db.insert(`INSERT INTO transactions (business_id, shift_id, date, type, payment_method, amount, fee, category_id, creditor_id, app_id, supplier, invoice_no, description, created_by)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, req.biz.id, t.shift_id, t.date, t.type, t.payment_method, t.amount, t.fee, t.category_id, t.creditor_id, t.app_id, t.supplier, t.invoice_no, t.description, req.user.id);
   await saveItems(id, t.items);
+  await recomputeShift(t.shift_id); // an invoice added to an already-closed (past) day
   await audit(req.biz.id, req.user.id, 'tx_create', { id, after: await txSnap(t) });
   return id;
 }
@@ -925,8 +993,10 @@ async function getTx(req) {
 // tx_edit may change anything (closed shifts are recalculated); a cashier may only fix own entries while the shift is open
 async function canModify(req, t) {
   if (req.can('tx_edit')) return;
-  const s = t.shift_id && await db.get('SELECT status FROM shifts WHERE id = ?', t.shift_id);
+  const s = t.shift_id && await db.get('SELECT status, date FROM shifts WHERE id = ?', t.shift_id);
   if (t.created_by === req.user.id && s && s.status === 'open') return;
+  // own entries of an earlier day, made from the "past days" page
+  if (t.created_by === req.user.id && s && req.can('past_days') && s.date < workDate(req.biz)) return;
   throw new HttpError(403, 'ليس لديك صلاحية لتعديل هذه الحركة');
 }
 biz.put('/transactions/:id', wrap(async (req) => {
@@ -974,8 +1044,8 @@ biz.get('/audit', need('audit_view'), wrap(async (req) => {
 }));
 
 biz.get('/transactions', need('tx_view_all'), wrap(async (req) => {
-  const from = isDate(req.query.from) ? req.query.from : today().slice(0, 8) + '01';
-  const to = isDate(req.query.to) ? req.query.to : today();
+  const from = isDate(req.query.from) ? req.query.from : workDate(req.biz).slice(0, 8) + '01';
+  const to = isDate(req.query.to) ? req.query.to : workDate(req.biz);
   const where = ['t.business_id = ?', 't.date BETWEEN ? AND ?'];
   const args = [req.biz.id, from, to];
   if (req.query.deleted === '1') where.push('t.deleted_at IS NOT NULL'); else where.push('t.deleted_at IS NULL');
@@ -993,7 +1063,7 @@ biz.get('/transactions', need('tx_view_all'), wrap(async (req) => {
 // ---------- reports ----------
 biz.get('/reports/daily', need('reports_view'), wrap(async (req) => {
   const b = req.biz;
-  const date = isDate(req.query.date) ? req.query.date : today();
+  const date = isDate(req.query.date) ? req.query.date : workDate(req.biz);
   const m = await movement(b, date, date);
   const prevBalance = await balanceAsOf(b, addDays(date, -1));
   const endBalance = await balanceAsOf(b, date);
@@ -1013,7 +1083,7 @@ biz.get('/reports/daily', need('reports_view'), wrap(async (req) => {
 
 biz.get('/reports/period', need('reports_view'), wrap(async (req) => {
   const b = req.biz;
-  const to = isDate(req.query.to) ? req.query.to : today();
+  const to = isDate(req.query.to) ? req.query.to : workDate(req.biz);
   const from = isDate(req.query.from) ? req.query.from : to.slice(0, 8) + '01';
   if (from > to) bad('تاريخ البداية بعد تاريخ النهاية');
   const m = await movement(b, from, to);

@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS businesses (
   id ${ID}, name TEXT NOT NULL,
   card_fee_pct ${REAL} NOT NULL DEFAULT 0, cash_float ${REAL} NOT NULL DEFAULT 0, opening_balance ${REAL} NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT ${NOW},
-  cashier_counts INTEGER NOT NULL DEFAULT 0, day_start_hour INTEGER NOT NULL DEFAULT 5,
+  cashier_counts INTEGER NOT NULL DEFAULT 0, day_start_hour INTEGER NOT NULL DEFAULT 5, open_time TEXT, close_time TEXT,
   logo TEXT, logo_updated TEXT, theme TEXT
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -193,6 +193,8 @@ async function migrateSqlite() {
     addCol('businesses', 'logo', 'TEXT');
     addCol('businesses', 'logo_updated', 'TEXT');
     addCol('businesses', 'theme', 'TEXT');
+    addCol('businesses', 'open_time', 'TEXT');
+    addCol('businesses', 'close_time', 'TEXT');
     addCol('creditors', 'deleted_at', 'TEXT');
     addCol('users', 'must_change', 'INTEGER NOT NULL DEFAULT 0');
   }
@@ -212,6 +214,8 @@ async function seedBusinessDefaults(businessId, apps) {
 async function init() {
   if (!PG) await migrateSqlite();
   await engine.exec(SCHEMA);
+  // PostgreSQL databases created by earlier versions: add the columns that came later
+  if (PG) await engine.exec('ALTER TABLE businesses ADD COLUMN IF NOT EXISTS open_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS close_time TEXT;');
   const { c } = await engine.get('SELECT COUNT(*) c FROM users');
   if (c === 0) {
     await engine.tx(async () => {
