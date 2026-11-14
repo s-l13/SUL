@@ -3,6 +3,7 @@
 (function (root) {
   const EN = {
     // ── general / navigation ──
+    'ديوان العائلة': 'Family Diwan',
     'نظام الإقفال اليومي': 'Daily Closing System',
     'الإقفال اليومي': 'Daily Closing',
     'سجّل الدخول للمتابعة': 'Sign in to continue',

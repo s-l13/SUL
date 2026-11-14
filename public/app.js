@@ -17,7 +17,7 @@ function T(s, vars) {
 const ARROW = LANG === 'en' ? '→' : '←'; // "before → after" reads in the page direction
 document.documentElement.lang = LANG;
 document.documentElement.dir = LANG === 'en' ? 'ltr' : 'rtl';
-document.title = T('نظام الإقفال اليومي');
+document.title = T('ديوان العائلة');
 function setLang(l) { try { localStorage.setItem('lang', l); } catch { } location.reload(); }
 const langBtn = (cls = 'btn sm') => `<button type="button" class="${cls}" onclick="setLang('${LANG === 'en' ? 'ar' : 'en'}')" title="${LANG === 'en' ? 'عربي' : 'English'}">${icon('globe')}<span>${LANG === 'en' ? 'عربي' : 'English'}</span></button>`;
 
@@ -207,7 +207,7 @@ function showLogin() {
   S.me = null;
   $('#app').innerHTML = `<div class="login"><form class="box" id="fLogin">
     <div class="lg-ic">${icon('store')}</div>
-    <h1>${T("نظام الإقفال اليومي")}</h1><p>${T("سجّل الدخول للمتابعة")}</p>
+    <h1>${T("ديوان العائلة")}</h1><p>${T("سجّل الدخول للمتابعة")}</p>
     <label>${T("اسم المستخدم")}<input name="username" autocomplete="username" required></label>
     <label>${T("كلمة المرور")}<input name="password" type="password" autocomplete="current-password" required></label>
     <div class="err" id="lerr"></div>

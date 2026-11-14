@@ -1,7 +1,7 @@
 {
   "name": "daily-close",
   "version": "1.0.0",
-  "description": "نظام الإقفال اليومي للمطاعم والأنشطة التجارية",
+  "description": "ديوان العائلة — إدارة أعمال العائلة: المطعم والصندوق وغيرها",
   "main": "server.js",
   "private": true,
   "scripts": {
