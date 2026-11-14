@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS shifts (
   orders_count INTEGER NOT NULL DEFAULT 0, card_fee ${REAL} NOT NULL DEFAULT 0,
   counted_cash ${REAL} NOT NULL DEFAULT 0, cash_with_staff ${REAL} NOT NULL DEFAULT 0,
   expected_cash ${REAL} NOT NULL DEFAULT 0, difference ${REAL} NOT NULL DEFAULT 0, notes TEXT,
-  counted_by INTEGER, counted_at TEXT
+  counted_by INTEGER, counted_at TEXT, act_cash ${REAL}, act_card ${REAL}
 );
 CREATE TABLE IF NOT EXISTS shift_app_sales (
   shift_id INTEGER NOT NULL REFERENCES shifts(id) ON DELETE CASCADE, app_id INTEGER NOT NULL REFERENCES delivery_apps(id),
@@ -176,7 +176,7 @@ CREATE INDEX IF NOT EXISTS ix_audit_biz ON audit_log(business_id, created_at);
 CREATE TABLE IF NOT EXISTS fund_settings (
   business_id INTEGER PRIMARY KEY REFERENCES businesses(id), start_month TEXT NOT NULL, due_day INTEGER NOT NULL DEFAULT 27,
   loan_multiplier ${REAL} NOT NULL DEFAULT 2, opening_balance ${REAL} NOT NULL DEFAULT 0,
-  show_names INTEGER NOT NULL DEFAULT 0, show_borrowers INTEGER NOT NULL DEFAULT 0, motto TEXT, statement_month TEXT
+  show_names INTEGER NOT NULL DEFAULT 0, show_borrowers INTEGER NOT NULL DEFAULT 0, motto TEXT, statement_month TEXT, impact_page TEXT
 );
 CREATE TABLE IF NOT EXISTS fund_categories (
   id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), name TEXT NOT NULL, amount ${REAL} NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1
@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS fund_members (
   id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), name TEXT NOT NULL, parent_id INTEGER,
   user_id INTEGER REFERENCES users(id), category_id INTEGER REFERENCES fund_categories(id), contributing INTEGER NOT NULL DEFAULT 1,
   join_month TEXT, left_month TEXT, guardian_access INTEGER NOT NULL DEFAULT 1, notes TEXT, deceased INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT ${NOW}, deleted_at TEXT
+  created_at TEXT NOT NULL DEFAULT ${NOW}, deleted_at TEXT, spouse_id INTEGER, mother_id INTEGER, guardian_act INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_fmem_biz ON fund_members(business_id);
 CREATE TABLE IF NOT EXISTS fund_rates (
@@ -201,7 +201,7 @@ CREATE TABLE IF NOT EXISTS fund_payments (
   id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), member_id INTEGER NOT NULL REFERENCES fund_members(id),
   month TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('dues','installment')), loan_id INTEGER REFERENCES fund_loans(id),
   amount ${REAL} NOT NULL, note TEXT, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL DEFAULT ${NOW},
-  deleted_at TEXT, deleted_by INTEGER REFERENCES users(id)
+  deleted_at TEXT, deleted_by INTEGER REFERENCES users(id), for_month TEXT, extra INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_fpay_biz ON fund_payments(business_id, month);
 CREATE TABLE IF NOT EXISTS fund_loan_requests (
@@ -221,7 +221,7 @@ CREATE TABLE IF NOT EXISTS fund_report_requests (
 );
 CREATE TABLE IF NOT EXISTS fund_banners (
   id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), title TEXT, body TEXT, color TEXT NOT NULL DEFAULT 'brand',
-  image TEXT, active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT ${NOW}
+  image TEXT, active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT ${NOW}, layout TEXT
 );
 -- goals of the fund (a campaign with gifts, or a target on the balance / total collected / number of contributors)
 CREATE TABLE IF NOT EXISTS fund_goals (
@@ -256,6 +256,8 @@ async function migrateSqlite() {
   if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='businesses'").get()) {
     addCol('shifts', 'counted_by', 'INTEGER');
     addCol('shifts', 'counted_at', 'TEXT');
+    addCol('shifts', 'act_cash', 'REAL');
+    addCol('shifts', 'act_card', 'REAL');
     addCol('businesses', 'cashier_counts', 'INTEGER NOT NULL DEFAULT 0');
     addCol('businesses', 'cash_count', 'INTEGER NOT NULL DEFAULT 0');
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transactions'").get()) addCol('transactions', 'card_part', 'REAL NOT NULL DEFAULT 0');
@@ -266,8 +268,10 @@ async function migrateSqlite() {
     addCol('businesses', 'open_time', 'TEXT');
     addCol('businesses', 'close_time', 'TEXT');
     addCol('businesses', 'kind', "TEXT NOT NULL DEFAULT 'restaurant'");
-    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fund_members'").get()) addCol('fund_members', 'deceased', 'INTEGER NOT NULL DEFAULT 0');
-    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fund_settings'").get()) { addCol('fund_settings', 'show_names', 'INTEGER NOT NULL DEFAULT 0'); addCol('fund_settings', 'show_borrowers', 'INTEGER NOT NULL DEFAULT 0'); addCol('fund_settings', 'motto', 'TEXT'); addCol('fund_settings', 'statement_month', 'TEXT'); }
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fund_members'").get()) { addCol('fund_members', 'deceased', 'INTEGER NOT NULL DEFAULT 0'); addCol('fund_members', 'spouse_id', 'INTEGER'); addCol('fund_members', 'mother_id', 'INTEGER'); addCol('fund_members', 'guardian_act', 'INTEGER NOT NULL DEFAULT 0'); }
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fund_payments'").get()) { addCol('fund_payments', 'for_month', 'TEXT'); addCol('fund_payments', 'extra', 'INTEGER NOT NULL DEFAULT 0'); }
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fund_banners'").get()) addCol('fund_banners', 'layout', 'TEXT');
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fund_settings'").get()) { addCol('fund_settings', 'show_names', 'INTEGER NOT NULL DEFAULT 0'); addCol('fund_settings', 'show_borrowers', 'INTEGER NOT NULL DEFAULT 0'); addCol('fund_settings', 'motto', 'TEXT'); addCol('fund_settings', 'statement_month', 'TEXT'); addCol('fund_settings', 'impact_page', 'TEXT'); }
     addCol('creditors', 'deleted_at', 'TEXT');
     addCol('users', 'must_change', 'INTEGER NOT NULL DEFAULT 0');
   }
@@ -288,7 +292,7 @@ async function init() {
   if (!PG) await migrateSqlite();
   await engine.exec(SCHEMA);
   // PostgreSQL databases created by earlier versions: add the columns that came later
-  if (PG) await engine.exec('ALTER TABLE businesses ADD COLUMN IF NOT EXISTS open_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS close_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT \'restaurant\'; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS cash_count INTEGER NOT NULL DEFAULT 0; ALTER TABLE transactions ADD COLUMN IF NOT EXISTS card_part DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS deceased INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_names INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_borrowers INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS motto TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS statement_month TEXT;');
+  if (PG) await engine.exec('ALTER TABLE businesses ADD COLUMN IF NOT EXISTS open_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS close_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT \'restaurant\'; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS cash_count INTEGER NOT NULL DEFAULT 0; ALTER TABLE transactions ADD COLUMN IF NOT EXISTS card_part DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE shifts ADD COLUMN IF NOT EXISTS act_cash DOUBLE PRECISION; ALTER TABLE shifts ADD COLUMN IF NOT EXISTS act_card DOUBLE PRECISION; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS deceased INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS spouse_id INTEGER; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS mother_id INTEGER; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS guardian_act INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_payments ADD COLUMN IF NOT EXISTS for_month TEXT; ALTER TABLE fund_payments ADD COLUMN IF NOT EXISTS extra INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_banners ADD COLUMN IF NOT EXISTS layout TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_names INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_borrowers INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS motto TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS statement_month TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS impact_page TEXT;');
   const { c } = await engine.get('SELECT COUNT(*) c FROM users');
   if (c === 0) {
     await engine.tx(async () => {

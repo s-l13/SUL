@@ -33,10 +33,10 @@ const ratingBadge = (r) => { const [l, c, ic] = RATING[r] || RATING.new; return 
 const commitBar = (v) => v === null ? '<span class="muted small">—</span>'
   : `<div class="cbar"><div class="progress"><i style="width:${v}%;background:var(--${v >= 95 ? 'pos' : v >= 80 ? 'info' : v >= 60 ? 'warn' : 'neg'})"></i></div><b class="num">${v}%</b></div>`;
 const fk = (label, value, ic, cls = '', sub = '') => `<div class="kpi ${cls}"><div class="k-ic">${icon(ic)}</div><div class="k-b"><div class="l">${label}</div><div class="v">${value}</div>${sub ? `<div class="small muted">${sub}</div>` : ''}</div></div>`;
-const STATUS_L = { full: T("مدفوع"), partial: T("جزئي"), missed: T("لم يُدفع"), open: T("الشهر الحالي"), none: T("لا يوجد استحقاق") };
+const STATUS_L = { full: T("مدفوع"), late: T("مدفوع متأخراً"), partial: T("جزئي"), missed: T("لم يُدفع"), open: T("الشهر الحالي"), none: T("لا يوجد استحقاق") };
 // last months of a member as small coloured squares
-const monthStrip = (months, n = 12) => `<div class="mstrip">${months.slice(-n).map(x => `<span class="ms ${x.status}" title="${monLabel(x.m)} — ${STATUS_L[x.status]}: ${money(x.paid)} / ${money(x.due)}"><i></i><small>${monName(x.m).slice(0, 3)}</small></span>`).join('')}</div>`;
-const mLegend = () => `<div class="legend small">${['full', 'partial', 'missed', 'open'].map(s => `<span><i class="ms-dot ${s}"></i>${STATUS_L[s]}</span>`).join('')}</div>`;
+const monthStrip = (months, n = 12) => `<div class="mstrip">${months.slice(-n).map(x => `<span class="ms ${x.status}" title="${monLabel(x.m)} — ${STATUS_L[x.status]}: ${money(x.covered ?? x.paid)} / ${money(x.due)}"><i></i><small>${monName(x.m).slice(0, 3)}</small></span>`).join('')}</div>`;
+const mLegend = () => `<div class="legend small">${['full', 'late', 'partial', 'missed', 'open'].map(s => `<span><i class="ms-dot ${s}"></i>${STATUS_L[s]}</span>`).join('')}</div>`;
 
 // cumulative growth of the fund (collected, balance) + monthly income bars
 function growthChart(series) {
@@ -68,7 +68,7 @@ function downloadCSV(name, rows) {
 function statementCSV(m) {
   downloadCSV('statement', [
     [T("كشف حساب"), m.name], [T("الاشتراك الشهري"), m.monthly], [T("إجمالي المساهمة"), m.total_paid], [T("المتأخرات"), m.arrears], [T("نسبة الالتزام"), pct(m.commitment)], [],
-    [T("الشهر"), T("المطلوب"), T("المدفوع"), T("الحالة")], ...m.months.map(x => [x.m, x.due, x.paid, STATUS_L[x.status]]),
+    [T("الشهر"), T("المطلوب"), T("المدفوع"), T("الحالة")], ...m.months.map(x => [x.m, x.due, x.covered ?? x.paid, STATUS_L[x.status]]),
     ...(m.payments ? [[], [T("الدفعات")], [T("الشهر"), T("النوع"), T("المبلغ"), T("التاريخ")], ...m.payments.map(p => [p.month, p.kind === 'dues' ? T("اشتراك") : T("قسط قرض"), p.amount, p.created_at.slice(0, 10)])] : []),
     ...((m.loans || []).length ? [[], [T("القروض")], [T("مبلغ القرض"), T("القسط"), T("المسدد"), T("المتبقي")], ...m.loans.map(l => [l.amount, l.installment, l.paid, l.remaining])] : []),
   ]);
@@ -76,10 +76,17 @@ function statementCSV(m) {
 
 /* ───────────── banners (rotating, on top of the fund page) ───────────── */
 const BANNER_COLORS = { brand: T("لون النظام"), sunset: T("غروب"), ocean: T("محيط"), forest: T("أخضر"), rose: T("وردي"), gold: T("ذهبي"), night: T("ليلي") };
+// size (small / medium / large), where the picture is centred, its zoom and how dark it is under the text
+const banLayout = (b) => { let L = b.layout; if (typeof L === 'string') { try { L = JSON.parse(L); } catch { L = null; } }
+  const n = (v, a, z, d) => { v = Number(v); return Number.isFinite(v) ? Math.min(z, Math.max(a, v)) : d; };
+  L = L || {}; return { size: ['s', 'm', 'l'].includes(L.size) ? L.size : 'm', x: n(L.x, 0, 100, 50), y: n(L.y, 0, 100, 50), zoom: n(L.zoom, 100, 300, 100), shade: n(L.shade, 0, 90, 55) }; };
+const slideHTML = (b, cls = '') => { const L = banLayout(b);
+  return `<div class="fb-slide c-${esc(b.color || 'brand')} sz-${L.size} ${b.image ? 'has-img' : ''} ${cls}" style="--shade:${L.shade / 100}">
+    ${b.image ? `<img class="fb-img" src="${esc(b.image)}" alt="" draggable="false" style="object-position:${L.x}% ${L.y}%;transform:scale(${L.zoom / 100});transform-origin:${L.x}% ${L.y}%">` : ''}
+    <div class="fb-t">${b.title ? `<h2>${esc(b.title)}</h2>` : ''}${b.body ? `<p>${esc(b.body)}</p>` : ''}</div></div>`; };
 function bannersHTML(list) {
   if (!list || !list.length) return '';
-  return `<div class="fbanners" data-count="${list.length}">${list.map((b, i) => `<div class="fb-slide c-${b.color} ${b.image ? 'has-img' : ''} ${i ? '' : 'on'}" ${b.image ? `style="background-image:linear-gradient(90deg,rgba(0,0,0,.55),rgba(0,0,0,.1)),url(${b.image})"` : ''}>
-      <div class="fb-t">${b.title ? `<h2>${esc(b.title)}</h2>` : ''}${b.body ? `<p>${esc(b.body)}</p>` : ''}</div></div>`).join('')}
+  return `<div class="fbanners" data-count="${list.length}">${list.map((b, i) => slideHTML(b, i ? '' : 'on')).join('')}
     ${list.length > 1 ? `<div class="fb-dots">${list.map((_, i) => `<button type="button" data-fb="${i}" class="${i ? '' : 'on'}" aria-label="${i + 1}"></button>`).join('')}</div>` : ''}</div>`;
 }
 function startBanners(el) {
@@ -110,29 +117,58 @@ async function bannersCard(box) {
   const list = await bapi('/fund/banners');
   box.innerHTML = `<div class="card-head"><h3>${icon('image')}${T("البانرات")}</h3><button class="btn sm primary" id="bBan">${icon('plus')}${T("إضافة بانر")}</button></div>
     <p class="muted small" style="margin:0 0 10px">${T("تظهر أعلى لوحة الصندوق لكل الأعضاء، وتتبدّل تلقائياً كل بضع ثوانٍ: ترحيب، تهنئة، تذكير بموعد الدفع…")}</p>
-    ${list.length ? `<div class="ban-list">${list.map(b => `<div class="ban-item ${b.active ? '' : 'off'}"><div class="fb-slide c-${b.color} on mini" ${b.image ? `style="background-image:linear-gradient(90deg,rgba(0,0,0,.55),rgba(0,0,0,.1)),url(${b.image})"` : ''}><div class="fb-t">${b.title ? `<h2>${esc(b.title)}</h2>` : ''}${b.body ? `<p>${esc(b.body)}</p>` : ''}</div></div>
+    ${list.length ? `<div class="ban-list">${list.map(b => `<div class="ban-item ${b.active ? '' : 'off'}">${slideHTML(b, 'on mini')}
       <div class="row">${b.active ? '' : `<span class="badge muted">${T("مخفي")}</span>`}<span class="grow"></span><button class="btn sm" data-bed="${b.id}">${icon('edit')}${T("تعديل")}</button></div></div>`).join('')}</div>`
       : `<p class="muted small">${T("لا توجد بانرات بعد")}</p>`}`;
   const form = (b) => {
     let image = b ? b.image : null;
+    const L = banLayout(b || {});
     const md = modal(b ? T("تعديل بانر") : T("بانر جديد"), `<form autocomplete="off">
       <label>${T("العنوان")}<input name="title" maxlength="120" value="${esc(b?.title || '')}" placeholder="${T("مثال: أهلاً بكم في صندوق العائلة")}"></label>
       <label style="margin-top:10px">${T("النص")} <span class="opt">${T("(اختياري)")}</span><input name="body" maxlength="400" value="${esc(b?.body || '')}" placeholder="${T("مثال: موعد الدفع يوم 27 من كل شهر")}"></label>
       <div class="sec-title" style="margin-top:12px">${T("اللون")}</div>
       <div class="ban-colors">${Object.entries(BANNER_COLORS).map(([k, l]) => `<label class="bc"><input type="radio" name="color" value="${k}" ${(b?.color || 'brand') === k ? 'checked' : ''}><span class="fb-slide c-${k} on"></span><small>${l}</small></label>`).join('')}</div>
-      <div class="row" style="margin-top:12px"><label class="btn sm">${icon('image')}${T("صورة خلفية")} <span class="opt">${T("(اختياري)")}</span><input type="file" accept="image/png,image/jpeg,image/webp" hidden id="banImg"></label>
+      <div class="sec-title" style="margin-top:12px">${T("حجم البانر")}</div>
+      <div class="seg">${[['s', T("صغير")], ['m', T("متوسط")], ['l', T("كبير")]].map(([k, l]) => `<label><input type="radio" name="size" value="${k}" ${L.size === k ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div>
+      <div class="row" style="margin-top:12px"><label class="btn sm">${icon('image')}<span id="banImgL">${image ? T("تغيير الصورة") : T("صورة خلفية")}</span> <span class="opt">${T("(اختياري)")}</span><input type="file" accept="image/png,image/jpeg,image/webp" hidden id="banImg"></label>
         <button type="button" class="btn sm ghost" id="banNoImg" ${image ? '' : 'hidden'}>${T("بدون صورة")}</button></div>
       <div id="banPrev" style="margin-top:12px"></div>
+      <div id="banCtl" class="ban-ctl" ${image ? '' : 'hidden'}>
+        <p class="small muted" style="margin:0">${icon('info')} ${T("اسحب الصورة في المعاينة لتحريكها، واستخدم الشريط للتكبير")}</p>
+        <label>${T("تكبير الصورة")}<input type="range" name="zoom" min="100" max="300" step="5" value="${L.zoom}"></label>
+        <label>${T("تعتيم الصورة (لوضوح الكتابة)")}<input type="range" name="shade" min="0" max="90" step="5" value="${L.shade}"></label>
+        <button type="button" class="btn sm ghost" id="banReset">${icon('undo')}${T("إعادة ضبط الصورة")}</button></div>
       <div class="row" style="margin-top:10px"><label class="check"><input type="checkbox" name="active" ${!b || b.active ? 'checked' : ''}> ${T("ظاهر")}</label>
         <label>${T("الترتيب")}<input name="sort" type="number" step="1" value="${b?.sort || 0}" style="width:80px"></label></div>
       <div class="mf">${b ? `<button type="button" class="btn danger" id="banDel">${icon('trash')}${T("حذف")}</button><span class="grow"></span>` : ''}<button class="btn primary">${T("حفظ")}</button></div></form>`);
     const f = $('form', md.el);
-    const prev = () => { const v = formObj(f); $('#banPrev', md.el).innerHTML = bannersHTML([{ title: v.title, body: v.body, color: v.color, image }]) || ''; $('#banNoImg', md.el).hidden = !image; };
-    f.addEventListener('input', prev); prev();
-    $('#banImg', md.el).onchange = async (e) => { const file = e.target.files[0]; e.target.value = ''; if (!file) return; try { image = await bannerImage(file); prev(); } catch (err) { fail(err); } };
+    let pos = { x: L.x, y: L.y };
+    const layout = () => ({ size: f.size.value, x: Math.round(pos.x), y: Math.round(pos.y), zoom: Number(f.zoom.value), shade: Number(f.shade.value) });
+    const prev = () => {
+      const v = formObj(f);
+      $('#banPrev', md.el).innerHTML = bannersHTML([{ title: v.title, body: v.body, color: v.color, image, layout: layout() }]) || '';
+      $('#banNoImg', md.el).hidden = !image; $('#banCtl', md.el).hidden = !image;
+      $('#banImgL', md.el).textContent = image ? T("تغيير الصورة") : T("صورة خلفية");
+    };
+    f.addEventListener('input', prev); f.addEventListener('change', prev); prev();
+    // drag the picture inside the preview to choose what shows
+    const pv = $('#banPrev', md.el);
+    let drag = null;
+    pv.addEventListener('pointerdown', (e) => { if (!image || !e.target.closest('.fb-slide')) return; const r = pv.getBoundingClientRect(); drag = { sx: e.clientX, sy: e.clientY, x: pos.x, y: pos.y, w: r.width, h: r.height }; pv.setPointerCapture(e.pointerId); e.preventDefault(); });
+    pv.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const k = 100 / (Number(f.zoom.value) / 100);
+      pos.x = Math.min(100, Math.max(0, drag.x - (e.clientX - drag.sx) / drag.w * k));
+      pos.y = Math.min(100, Math.max(0, drag.y - (e.clientY - drag.sy) / drag.h * k));
+      const img = $('.fb-img', pv); if (img) { img.style.objectPosition = `${pos.x}% ${pos.y}%`; img.style.transformOrigin = `${pos.x}% ${pos.y}%`; }
+    });
+    const end = () => { drag = null; }; pv.addEventListener('pointerup', end); pv.addEventListener('pointercancel', end);
+    $('#banReset', md.el).onclick = () => { pos = { x: 50, y: 50 }; f.zoom.value = 100; f.shade.value = 55; prev(); };
+    $('#banImg', md.el).onchange = async (e) => { const file = e.target.files[0]; e.target.value = ''; if (!file) return; try { image = await bannerImage(file); pos = { x: 50, y: 50 }; f.zoom.value = 100; prev(); } catch (err) { fail(err); } };
     $('#banNoImg', md.el).onclick = () => { image = null; prev(); };
     f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
-      const body = { ...formObj(f), active: f.active.checked, image };
+      const { size, zoom, shade, ...fo } = formObj(f);
+      const body = { ...fo, active: f.active.checked, image, layout: layout() };
       if (b) await bapi('/fund/banners/' + b.id, { method: 'PUT', body }); else await bapi('/fund/banners', { method: 'POST', body });
       md.close(); toast(T("تم الحفظ"), 'ok'); bannersCard(box);
     }); };
@@ -146,10 +182,11 @@ async function bannersCard(box) {
 
 /* ───────────── contribution of each small family (a head + everyone under them) ───────────── */
 function familiesTable(d) {
-  const ms = d.members, kids = (id) => ms.filter(m => m.parent_id === id);
+  const ms = d.members, up = (m) => m.spouse_id && ms.some(q => q.id === m.spouse_id) ? m.spouse_id : m.parent_id; // a wife is in her husband's family
+  const kids = (id) => ms.filter(m => up(m) === id);
   const below = (m) => [m, ...kids(m.id).flatMap(below)];
   // the families = the children of each top person (the head may be "the X family" or a late grandfather)
-  const tops = ms.filter(m => !m.parent_id || !ms.some(p => p.id === m.parent_id));
+  const tops = ms.filter(m => !up(m) || !ms.some(p => p.id === up(m)));
   const fams = tops.flatMap(t => !t.contributing && kids(t.id).length ? kids(t.id) : [t]).map(h => {
     const all = below(h), payers = all.filter(m => m.contributing);
     const due = all.reduce((a, m) => a + (m.due_closed || 0), 0), cov = all.reduce((a, m) => a + (m.covered_closed || 0), 0);
@@ -271,9 +308,17 @@ VIEWS.fund = async (el) => {
     ...active.map(m => [m.name, m.monthly, m.total_paid, m.share + '%', m.arrears, m.late_months, pct(m.commitment), (RATING[m.rating] || RATING.new)[0]])]);
 };
 
-// the logged-in member's own card(s): self + children they follow
+// the logged-in member's own card(s): self + children they follow — with one summary of everyone's commitment first
 function myCards(d) {
-  return d.mine.map(m => {
+  const kids = d.mine.filter(m => m.relation === 'child');
+  const summary = kids.length ? `<section class="card"><div class="card-head"><h3>${icon('users')}${T("التزامي والتزام أبنائي")}</h3></div>
+    <div class="fam-list">${d.mine.map(m => { const tm = m.this_month, open = tm && tm.remaining > 0.005;
+      return `<div class="fam-row clickable" data-mine="${m.id}">
+        <div class="fr-h"><b>${esc(m.name)}</b>${m.relation === 'self' ? ` <span class="badge muted">${T("أنا")}</span>` : ''}<span class="grow"></span>${ratingBadge(m.rating)}</div>
+        <div class="fr-b"><span class="fr-c">${T("الالتزام")} ${commitBar(m.commitment)}</span>
+          ${!tm || !tm.due ? '' : open ? `<span class="badge warn">${T("هذا الشهر")}: ${T("المتبقي")} ${money(tm.remaining)}</span>` : `<span class="badge pos">${icon('check')}${T("هذا الشهر")}: ${T("مدفوع")}</span>`}
+          ${m.arrears ? `<span class="badge neg">${T("المتأخرات")} ${money(m.arrears)}</span>` : ''}</div></div>`; }).join('')}</div></section>` : '';
+  return summary + d.mine.map(m => {
     const tm = m.this_month;
     const unpaid = tm && tm.remaining > 0.005;
     return `<section class="card my-card">
@@ -281,14 +326,14 @@ function myCards(d) {
       ${unpaid ? `<div class="banner warn">${icon('alert')}<span class="grow">${T("اشتراك هذا الشهر لم يكتمل بعد")} — ${T("المتبقي")} <b>${money(tm.remaining + m.arrears)}</b></span></div>` : tm && tm.due ? `<div class="banner ok">${icon('check')}<span class="grow">${T("اشتراك هذا الشهر مدفوع، شكراً لالتزامك")}</span></div>` : ''}
       <div class="grid kpis fk">
         ${fk(T("الاشتراك الشهري"), M(m.monthly), 'calendar')}
-        ${fk(T("إجمالي ما دفعته"), M(m.total_paid), 'coins', 'pos', `${T("نسبة المشاركة")} ${m.share ?? 0}%`)}
+        ${fk(m.relation === 'child' ? T("إجمالي ما دفعه") : T("إجمالي ما دفعته"), M(m.total_paid), 'coins', 'pos', `${T("نسبة المشاركة")} ${m.share ?? 0}%`)}
         ${fk(T("المتأخرات"), M(m.arrears), 'alert', m.arrears ? 'neg' : '')}
         ${fk(T("نسبة الالتزام"), pct(m.commitment), 'percent', '', `${m.late_months} ${T("شهر متعثر")}`)}
       </div>
       <div class="sec-title">${icon('calendar')}<span class="grow">${T("آخر 12 شهراً")}</span>${mLegend()}</div>${monthStrip(m.months, 12)}
       ${m.loans.length ? `<div class="sec-title">${icon('landmark')}<span class="grow">${T("القروض")}</span></div>${m.loans.map(loanLine).join('')}` : ''}
       <p class="hint">${icon('info')}<span>${T("الحد المسموح للقرض")} = ${T("ضعف مساهماتك")}: <b>${money(m.loan_limit)}</b>${m.flagged ? ` — <b class="neg-t">${T("تنبيه: سجل السداد فيه تعثر، وقد يكون سبباً في رفض طلب القرض")}</b>` : ''}</span></p>
-      <div class="row"><a class="btn sm" href="#/statement/${m.id}">${icon('fileText')}${T("الكشف الشهري")}</a><button class="btn sm" data-mine="${m.id}">${icon('list')}${T("كشف الحساب والدفعات")}</button><a class="btn sm" href="#/loanreq">${icon('hand')}${T("طلب قرض")}</a></div>
+      <div class="row"><a class="btn sm" href="#/statement/${m.id}">${icon('fileText')}${T("الكشف الشهري")}</a><button class="btn sm" data-mine="${m.id}">${icon('list')}${T("كشف الحساب والدفعات")}</button>${m.relation !== 'child' || m.guardian_act ? `<a class="btn sm" href="#/loanreq">${icon('hand')}${T("طلب قرض")}</a>` : ''}</div>
     </section>`;
   }).join('');
 }
@@ -302,13 +347,13 @@ const loanLine = (l) => `<div class="loan-line"><div class="grow"><b>${money(l.a
 async function memberDetail(id) {
   const m = await bapi('/fund/members/' + id);
   const md = modal(m.name, `<div class="row no-print" style="justify-content:flex-end;margin-bottom:8px"><button class="btn sm" data-go="#/statement/${m.id}">${icon('fileText')}${T("الكشف الشهري")}</button><button class="btn sm" id="bStmt">${icon('download')}${T("تنزيل كشف الحساب")}</button></div>
-    <div class="grid kpis fk">${fk(T("الاشتراك الشهري"), M(m.monthly), 'calendar')}${fk(T("إجمالي المساهمة"), M(m.total_paid), 'coins', 'pos')}${fk(T("المتأخرات"), M(m.arrears), 'alert', m.arrears ? 'neg' : '')}${fk(T("الالتزام"), pct(m.commitment), 'percent', '', ratingBadge(m.rating))}</div>
+    <div class="grid kpis fk">${fk(T("الاشتراك الشهري"), M(m.monthly), 'calendar')}${fk(T("إجمالي المساهمة"), M(m.total_paid), 'coins', 'pos', m.extra_paid ? `<span class="small muted">${T("منها إضافية")} ${money(m.extra_paid)}</span>` : '')}${fk(T("المتأخرات"), M(m.arrears), 'alert', m.arrears ? 'neg' : '')}${fk(T("الالتزام"), pct(m.commitment), 'percent', '', ratingBadge(m.rating))}</div>
     <div class="sec-title">${icon('calendar')}<span class="grow">${T("الأشهر")}</span>${mLegend()}</div>${monthStrip(m.months, 36)}
     ${m.flagged ? `<div class="banner warn">${icon('alert')}<span class="grow">${T("تعثّر")} ${m.max_run >= 3 ? `${m.max_run} ${T("أشهر متتالية")}` : `${m.late_months} ${T("أشهر متفرقة")}`}</span></div>` : ''}
     ${m.loans.length ? `<div class="sec-title">${icon('landmark')}<span class="grow">${T("القروض")}</span></div>${m.loans.map(loanLine).join('')}` : ''}
     <div class="sec-title">${icon('list')}<span class="grow">${T("الدفعات")}</span></div>
     ${m.payments.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("الشهر")}</th><th>${T("النوع")}</th><th>${T("المبلغ")}</th><th>${T("سجّلها")}</th><th>${T("الإيصال")}</th></tr></thead><tbody>
-      ${m.payments.map(p => `<tr><td>${monLabel(p.month)}</td><td>${p.kind === 'dues' ? T("اشتراك") : T("قسط قرض")}</td><td class="n"><b>${money(p.amount)}</b></td><td class="small muted">${esc(p.by)} · ${p.created_at.slice(0, 10)}</td>
+      ${m.payments.map(p => `<tr><td>${monLabel(p.month)}${p.for_month && p.for_month !== p.month ? `<div class="small muted">${T("عن")} ${monLabel(p.for_month)}</div>` : ''}</td><td>${p.kind !== 'dues' ? T("قسط قرض") : p.extra ? T("مساهمة إضافية") : T("اشتراك")}</td><td class="n"><b>${money(p.amount)}</b></td><td class="small muted">${esc(p.by)} · ${p.created_at.slice(0, 10)}</td>
         <td><button class="btn sm ghost" data-go="#/receipt/${p.id}">${icon('receipt')}<span dir="ltr">R-${String(p.id).padStart(6, '0')}</span></button></td></tr>`).join('')}</tbody></table></div>` : `<p class="muted small">${T("لا توجد دفعات")}</p>`}
     ${m.rates.length > 1 ? `<div class="sec-title">${icon('history')}<span class="grow">${T("تغيّر الاشتراك")}</span></div><p class="small">${m.rates.map(r => `${T("من")} ${monLabel(r.from_month)}: <b>${money(r.amount)}</b>`).join(' · ')}</p>` : ''}`, { wide: true });
   $('#bStmt', md.el).onclick = () => statementCSV(m);
@@ -339,12 +384,34 @@ VIEWS.collect = async (el, [month]) => {
   const reload = () => VIEWS.collect(el, [d.month]);
   $$('form[data-pay]', el).forEach(f => {
     const [mid, kind, loan] = f.dataset.pay.split(':');
-    $('[data-full]', f).onclick = () => { f.amount.value = f.dataset.left; f.amount.focus(); };
+    // paid short: tick the months the member defaulted on — the money counts for the other months
+    const box = $('.pay-months', f.parentElement);
+    const picked = () => box ? $$('input:checked', box).map(i => i.value) : [];
+    const drawMonths = () => {
+      if (!box) return;
+      const a = Number(f.amount.value) || 0;
+      box.hidden = !(a > 0 && a < Number(f.dataset.left) - 0.005);
+      const all = $$('input', box).map(i => i.value), late = picked(), pay = all.filter(m => !late.includes(m));
+      $('.pm-note', box).innerHTML = box.hidden || !late.length ? '' : pay.length
+        ? `${T("يُحسب المبلغ عن")}: <b>${pay.map(monLabel).join('، ')}</b> · <span class="neg-t">${T("متعثر في")}: ${late.map(monLabel).join('، ')}</span>`
+        : `<span class="neg-t">${T("اترك شهراً واحداً على الأقل يُحسب عنه المبلغ")}</span>`;
+    };
+    // paid more than due: the rest as an extra contribution (more right to a loan) or paid ahead for the coming months
+    const xb = $('.pay-extra', f.parentElement);
+    const over = () => r2((Number(f.amount.value) || 0) - Number(f.dataset.left));
+    const drawExtra = () => { if (!xb) return; const o = over(); xb.hidden = !(o > 0.005); $('.px-amt', xb).textContent = money(Math.max(0, o)); };
+    f.addEventListener('input', drawExtra); drawExtra();
+    f.addEventListener('input', drawMonths); if (box) box.addEventListener('change', drawMonths);
+    $('[data-full]', f).onclick = () => { f.amount.value = f.dataset.left; f.amount.focus(); drawMonths(); };
     f.onsubmit = (e) => {
       e.preventDefault();
+      const late = box && !box.hidden ? picked() : [];
+      const months = late.length ? $$('input', box).map(i => i.value).filter(m => !late.includes(m)) : undefined;
+      if (months && !months.length) return toast(T("اترك شهراً واحداً على الأقل يُحسب عنه المبلغ"), 'err');
+      const extra = xb && !xb.hidden && ($('input[name^=px]:checked', xb) || {}).value === 'extra' ? over() : undefined;
       busy(e.submitter || $('button.primary', f), async () => {
-        const r = await bapi('/fund/payments', { method: 'POST', body: { member_id: Number(mid), month: d.month, kind, loan_id: loan ? Number(loan) : undefined, amount: f.amount.value } });
-        toast(`${T("تم تسجيل")} ${money(f.amount.value)} ✓ — ${T("إيصال")} ${r.no}`, 'ok'); reload();
+        const r = await bapi('/fund/payments', { method: 'POST', body: { member_id: Number(mid), month: d.month, kind, loan_id: loan ? Number(loan) : undefined, amount: f.amount.value, months, extra } });
+        toast(`${T("تم تسجيل")} ${money(f.amount.value)} ✓ — ${T("إيصال")} ${r.nos.join('، ')}`, 'ok'); reload();
       });
     };
   });
@@ -358,12 +425,20 @@ function payForm(mid, kind, loanId, label, x) {
   return `<div class="pay-line">
     <div class="pl-h"><b>${label}</b>
       <span class="small">${T("المطلوب")} <b class="num">${money(x.required)}</b>${x.arrears ? ` <span class="neg-t">(${T("منها متأخرات")} ${money(x.arrears)})</span>` : ''}${x.remaining !== undefined ? ` · <span class="muted">${T("المتبقي من القرض")} ${money(x.remaining)}</span>` : ''}</span>
-      <span class="grow"></span>${x.paid >= x.required - 0.005 && x.required > 0 ? `<span class="badge pos">${icon('check')}${T("مكتمل")}</span>` : x.paid > 0 ? `<span class="badge warn">${T("جزئي")}</span>` : ''}</div>
-    ${x.payments.length ? `<div class="chips">${x.payments.map(p => `<span class="chip pay"><a href="#/receipt/${p.id}" title="${T("الإيصال")}">${icon('receipt')}</a>${money(p.amount)}${can('fund_manage') || p.created_by === S.me.user.id ? `<button type="button" data-delpay="${p.id}" title="${T("حذف")}">${icon('x')}</button>` : ''}</span>`).join('')}</div>` : ''}
+      <span class="grow"></span>${x.paid >= x.required - 0.005 && x.required > 0 ? `<span class="badge pos">${icon('check')}${T("مكتمل")}</span>` : x.paid > 0 ? `<span class="badge warn">${T("جزئي")}</span>` : ''}${x.extra ? ` <span class="badge info">${T("مساهمة إضافية")} ${money(x.extra)}</span>` : ''}</div>
+    ${x.payments.length ? `<div class="chips">${x.payments.map(p => `<span class="chip pay"><a href="#/receipt/${p.id}" title="${T("الإيصال")}">${icon('receipt')}</a>${money(p.amount)}${p.extra ? ` <small>${T("إضافية")}</small>` : ''}${p.for_month && p.for_month !== p.month ? ` <small class="muted">${T("عن")} ${monLabel(p.for_month)}</small>` : ''}${can('fund_manage') || p.created_by === S.me.user.id ? `<button type="button" data-delpay="${p.id}" title="${T("حذف")}">${icon('x')}</button>` : ''}</span>`).join('')}</div>` : ''}
     <form class="pay-f" data-pay="${mid}:${kind}:${loanId || ''}" data-left="${left}" autocomplete="off">
       <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" placeholder="${T("المبلغ المدفوع")}" required>
       <button type="button" class="btn sm" data-full ${left ? '' : 'disabled'}>${T("كامل")} ${left ? money(left) : ''}</button>
-      <button class="btn sm primary">${icon('check')}${T("تسجيل")}</button></form></div>`;
+      <button class="btn sm primary">${icon('check')}${T("تسجيل")}</button>
+      ${kind === 'dues' ? `<div class="pay-extra" hidden><div class="small"><b>${T("المبلغ أكبر من المطلوب بـ")} <span class="px-amt num"></span></b> — ${T("ماذا نفعل بالزيادة؟")}</div>
+        <label class="check"><input type="radio" name="px${mid}" value="extra" checked> ${T("مساهمة إضافية")}</label>
+        <div class="muted small" style="margin:-4px 0 2px;padding-inline-start:26px">${T("(تزيد مساهماته وأحقيته في القرض، ويبقى عليه اشتراك الشهور القادمة)")}</div>
+        <label class="check"><input type="radio" name="px${mid}" value="ahead"> ${T("دفعة مقدّمة للشهور القادمة")}</label></div>` : ''}</form>
+    ${kind === 'dues' && (x.open_months || []).length > 1 ? `<div class="pay-months" hidden>
+      <div class="small"><b>${T("المبلغ أقل من المطلوب — حدّد الشهور التي تعثّر فيها")}</b> <span class="muted">${T("(اختياري — بدون تحديد يُخصم المبلغ من المتأخرات فقط)")}</span></div>
+      <div class="chips">${x.open_months.map(o => `<label class="chip mchk"><input type="checkbox" value="${o.m}"> ${monLabel(o.m)} <span class="muted num">${money(o.left)}</span></label>`).join('')}</div>
+      <div class="small pm-note"></div></div>` : ''}</div>`;
 }
 const collectRow = (r) => `<section class="card c-row ${r.done ? 'done' : ''}">
   <div class="card-head"><h3>${esc(r.name)}${r.parent ? ` <span class="muted small">${T("ابن/ة")} ${esc(r.parent)}</span>` : ''}</h3>${r.done ? `<span class="badge pos">${icon('check')}${T("مكتمل")}</span>` : ''}</div>
@@ -378,23 +453,65 @@ VIEWS.flow = async (el, [year]) => {
   const y = years.includes(year) ? year : years[years.length - 1] || d.now.slice(0, 4);
   const months = d.series.filter(s => s.m.startsWith(y));
   const members = d.members.filter(m => m.contributing || m.total_paid);
-  el.innerHTML = `${pageHead('list', T("سجل الدفعات"), T("تدفق الأموال الشهري لكل عضو"), `<div class="seg" style="margin:0">${years.map(v => `<label><input type="radio" name="fy" value="${v}" ${v === y ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
+  const edit = can('fund_collect') || can('fund_manage');
+  el.innerHTML = `${pageHead('list', T("سجل الدفعات"), T("تدفق الأموال الشهري لكل عضو") + (edit ? ' — ' + T("اضغط على أي شهر لتسجيل مبلغه أو تعديله") : ''), `<div class="seg" style="margin:0">${years.map(v => `<label><input type="radio" name="fy" value="${v}" ${v === y ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
     <button class="btn" id="bFcsv">${icon('download')}${T("تنزيل Excel")}</button><button class="btn" onclick="print()">${icon('printer')}${T("طباعة")}</button>`)}
     <section class="card">${mLegend()}<div class="tbl-wrap"><table class="flow"><thead><tr><th>${T("الاسم")}</th><th>${T("الشهري")}</th>${months.map(s => `<th>${monName(s.m)}</th>`).join('')}<th>${T("المجموع")}</th></tr></thead><tbody>
     ${members.map(m => {
+      // each month shows what covers it (even when paid in a later month); extra contributions are added with +
       const by = new Map(m.months.map(x => [x.m, x]));
-      return `<tr><td><b>${esc(m.name)}</b></td><td class="n muted">${money(m.monthly)}</td>${months.map(s => { const x = by.get(s.m); return x ? `<td class="fc ${x.status}" title="${STATUS_L[x.status]}: ${money(x.paid)} / ${money(x.due)}">${x.paid ? money(x.paid).replace('.00', '') : '-'}</td>` : '<td class="fc none"></td>'; }).join('')}
-        <td class="n"><b>${money(months.reduce((a, s) => a + (by.get(s.m)?.paid || 0), 0))}</b></td></tr>`;
+      const cell = (x) => (x.covered ? money(x.covered).replace('.00', '') : '-') + (x.extra ? ` <small class="fx">+${money(x.extra).replace('.00', '')}</small>` : '');
+      const tip = (x) => `${STATUS_L[x.status]}: ${money(x.covered)} / ${money(x.due)}${x.paid ? ` — ${T("المستلم في هذا الشهر")} ${money(x.paid)}` : ''}`;
+      const credit = y === d.now.slice(0, 4) && m.credit > 0.005 ? `<div class="small muted">+ ${T("مقدّم")} ${money(m.credit)}</div>` : '';
+      return `<tr><td><b>${esc(m.name)}</b></td><td class="n muted">${money(m.monthly)}</td>${months.map(s => { const x = by.get(s.m); return x ? `<td class="fc ${x.status} ${edit ? 'ed' : ''}" title="${tip(x)}" ${edit ? `data-cell="${m.id}:${x.m}"` : ''}>${cell(x)}</td>` : '<td class="fc none"></td>'; }).join('')}
+        <td class="n"><b>${money(months.reduce((a, s) => a + (by.get(s.m)?.covered || 0) + (by.get(s.m)?.extra || 0), 0) + (credit ? m.credit : 0))}</b>${credit}</td></tr>`;
     }).join('')}
     </tbody><tfoot>
-      <tr><td colspan="2"><b>${T("مجموع الدخل الشهري")}</b></td>${months.map(s => `<td class="n"><b>${money(s.income).replace('.00', '')}</b></td>`).join('')}<td class="n"><b>${money(months.reduce((a, s) => a + s.income, 0))}</b></td></tr>
+      <tr><td colspan="2"><b>${T("المحصّل فعلياً في الشهر")}</b></td>${months.map(s => `<td class="n"><b>${money(s.income).replace('.00', '')}</b></td>`).join('')}<td class="n"><b>${money(months.reduce((a, s) => a + s.income, 0))}</b></td></tr>
       <tr><td colspan="2">${T("المجموع التراكمي")}</td>${months.map(s => `<td class="n muted">${money(s.collected).replace('.00', '')}</td>`).join('')}<td></td></tr>
     </tfoot></table></div></section>`;
   $$('[name=fy]', el).forEach(r => r.onchange = () => { location.hash = '#/flow/' + r.value; });
+  $$('[data-cell]', el).forEach(td => td.onclick = () => { const [mid, mo] = td.dataset.cell.split(':'); monthCell(Number(mid), mo, async () => { S.fund = null; await VIEWS.flow(el, [y]); }).catch(fail); });
   $('#bFcsv').onclick = () => downloadCSV('payments-' + y, [[T("الاسم"), T("الشهري"), ...months.map(x => x.m), T("المجموع")],
-    ...members.map(m => { const by = new Map(m.months.map(x => [x.m, x])); return [m.name, m.monthly, ...months.map(x => by.get(x.m)?.paid || 0), months.reduce((a, x) => a + (by.get(x.m)?.paid || 0), 0)]; }),
-    [T("مجموع الدخل الشهري"), '', ...months.map(x => x.income), months.reduce((a, x) => a + x.income, 0)]]);
+    ...members.map(m => { const by = new Map(m.months.map(x => [x.m, x])); const v = (x) => (by.get(x.m)?.covered || 0) + (by.get(x.m)?.extra || 0); return [m.name, m.monthly, ...months.map(v), months.reduce((a, x) => a + v(x), 0) + (y === d.now.slice(0, 4) ? m.credit || 0 : 0)]; }),
+    [T("المحصّل فعلياً في الشهر"), '', ...months.map(x => x.income), months.reduce((a, x) => a + x.income, 0)]]);
 };
+
+// one member × one month: what covers it, the money recorded in that month (delete a wrong one), and add an amount for it
+async function monthCell(mid, mo, after) {
+  const m = await bapi('/fund/members/' + mid);
+  const x = m.months.find(q => q.m === mo);
+  if (!x) return;
+  const pays = m.payments.filter(p => p.kind === 'dues' && p.month === mo);
+  const left = Math.max(0, r2(x.due - x.covered));
+  const fromOther = x.covered > 0.005 && !pays.length;
+  const md = modal(`${m.name} — ${monLabel(mo)}`, `<div class="summary-box">
+      <div class="r"><span>${T("المستحق لهذا الشهر")}</span><b>${money(x.due)}</b></div>
+      <div class="r"><span>${T("المغطّى")}</span><b>${money(x.covered)}</b> <span class="badge ${x.status === 'missed' ? 'neg' : x.status === 'partial' ? 'warn' : 'pos'}">${STATUS_L[x.status]}</span></div>
+      ${x.extra ? `<div class="r"><span>${T("مساهمة إضافية")}</span><b>${money(x.extra)}</b></div>` : ''}</div>
+    ${fromOther ? `<p class="hint">${icon('info')}<span>${T("هذا الشهر مغطّى من مبلغ سُجّل في شهر آخر. لتوزيعه على الشهور: احذفه من شهره، ثم سجّل مبلغ كل شهر من خانته")}.</span></p>` : ''}
+    <div class="sec-title">${T("المبالغ المسجّلة في هذا الشهر")}</div>
+    ${pays.length ? `<div class="chips">${pays.map(p => `<span class="chip pay"><a href="#/receipt/${p.id}" title="${T("الإيصال")}">${icon('receipt')}</a>${money(p.amount)}${p.extra ? ` <small>${T("إضافية")}</small>` : ''}${p.for_month && p.for_month !== p.month ? ` <small class="muted">${T("عن")} ${monLabel(p.for_month)}</small>` : ''}${can('fund_manage') || p.created_by === S.me.user.id ? `<button type="button" data-delp="${p.id}" title="${T("حذف")}">${icon('x')}</button>` : ''}</span>`).join('')}</div>` : `<p class="muted small">${T("لا يوجد")}</p>`}
+    <form autocomplete="off" style="margin-top:12px"><label>${T("إضافة مبلغ لهذا الشهر")}<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${left || ''}"></label>
+      <div class="pay-extra" hidden style="margin-top:8px"><div class="small"><b>${T("الزيادة عن المستحق")}: <span class="px-amt num"></span></b> — ${T("ماذا نفعل بالزيادة؟")}</div>
+        <label class="check"><input type="radio" name="px" value="extra" checked> ${T("مساهمة إضافية")}</label>
+        <div class="muted small" style="margin:-4px 0 2px;padding-inline-start:26px">${T("(تزيد مساهماته وأحقيته في القرض، ويبقى عليه اشتراك الشهور القادمة)")}</div>
+        <label class="check"><input type="radio" name="px" value="ahead"> ${T("دفعة مقدّمة للشهور القادمة")}</label></div>
+      <div class="mf"><button class="btn primary">${icon('check')}${T("تسجيل")}</button><button type="button" class="btn" data-x>${T("إغلاق")}</button></div></form>`);
+  const f = $('form', md.el), xb = $('.pay-extra', md.el);
+  const over = () => r2((Number(f.amount.value) || 0) - left);
+  const draw = () => { const o = over(); xb.hidden = !(o > 0.005); $('.px-amt', xb).textContent = money(Math.max(0, o)); };
+  f.oninput = draw; draw();
+  f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+    const extra = !xb.hidden && f.px.value === 'extra' ? over() : undefined;
+    const r = await bapi('/fund/payments', { method: 'POST', body: { member_id: mid, month: mo, kind: 'dues', amount: f.amount.value, months: left > 0.005 ? [mo] : undefined, extra } });
+    md.close(); toast(`${T("تم تسجيل")} ${money(f.amount.value)} ✓ — ${T("إيصال")} ${r.nos.join('، ')}`, 'ok'); after();
+  }); };
+  $$('[data-delp]', md.el).forEach(b => b.onclick = async () => {
+    if (!await confirmBox(T("حذف الدفعة"), `<p>${T("حذف هذه الدفعة؟ ستظهر في سجل التعديلات")}.</p>`, T("حذف"), true)) return;
+    try { await bapi('/fund/payments/' + b.dataset.delp, { method: 'DELETE' }); md.close(); toast(T("تم الحذف"), 'ok'); after(); } catch (err) { fail(err); }
+  });
+}
 
 /* ───────────── members & family tree ───────────── */
 // state of a person in the tree: paid up / owes this month / late (arrears) / not contributing
@@ -410,29 +527,45 @@ VIEWS.members = async (el, _, keep) => {
   // supervisors get the full figures; a member gets names only, plus their own (and their children's) figures
   const list = (d.full ? d.members : d.tree).map(m => mineMap.has(m.id) && !d.full ? { ...m, ...mineMap.get(m.id) } : m);
   const byId = new Map(list.map(m => [m.id, m]));
-  const kids = (pid) => list.filter(m => (m.parent_id || null) === pid);
-  const subtotal = (m) => (m.total_paid || 0) + kids(m.id).reduce((a, k) => a + subtotal(k), 0);
-  const people = (m) => (m.contributing ? 1 : 0) + kids(m.id).reduce((a, k) => a + people(k), 0);
-  const allBelow = (m) => kids(m.id).reduce((a, k) => a + 1 + allBelow(k), 0);
-  const roots = list.filter(m => !m.parent_id || !byId.has(m.parent_id));
+  // a wife / mother stands beside her husband (one frame); their children hang under the couple
+  const isWife = (m) => !!(m.spouse_id && byId.has(m.spouse_id));
+  const wivesOf = (id) => list.filter(m => m.spouse_id === id);
+  const kids = (pid) => list.filter(m => !isWife(m) && (m.parent_id || null) === pid);
+  const kidsOf = (m) => { // the father's children (plus any recorded under the mother herself), grouped by mother
+    const w = wivesOf(m.id), all = [...kids(m.id), ...w.flatMap(x => kids(x.id))];
+    const mom = (k) => w.findIndex(x => x.id === (k.mother_id || k.parent_id));
+    return w.length > 1 ? all.sort((a, b) => mom(a) - mom(b)) : all;
+  };
+  const below = (m) => isWife(m) ? [] : [...wivesOf(m.id), ...kidsOf(m)];
+  const subtotal = (m) => (m.total_paid || 0) + below(m).reduce((a, k) => a + subtotal(k), 0);
+  const people = (m) => (m.contributing ? 1 : 0) + below(m).reduce((a, k) => a + people(k), 0);
+  const allBelow = (m) => below(m).reduce((a, k) => a + 1 + allBelow(k), 0);
+  const roots = list.filter(m => !isWife(m) && (!m.parent_id || !byId.has(m.parent_id)));
+  const motherOf = (k) => byId.get(k.mother_id) || (byId.get(k.parent_id) && isWife(byId.get(k.parent_id)) ? byId.get(k.parent_id) : null);
+  const fatherOf = (k) => { const p = byId.get(k.parent_id); return p && isWife(p) ? byId.get(p.spouse_id) : p; };
   const known = (m) => d.full || mineMap.has(m.id);
-  const node = (m) => {
-    const ch = kids(m.id), closed = st.collapsed.has(m.id);
+  const person = (m, { tog = '', mom = '' } = {}) => {
     const state = known(m) ? nodeState(m) : 'none';
-    return `<li><div class="onode s-${state} ${m.deceased ? 'dead' : ''} ${mineMap.has(m.id) ? 'me' : ''} ${st.sel === m.id ? 'sel' : ''}" data-n="${m.id}" title="${esc(m.name)}${known(m) ? ' — ' + NODE_L[state] : ''}">
+    return `<div class="onode s-${state} ${m.deceased ? 'dead' : ''} ${isWife(m) ? 'wife' : ''} ${mineMap.has(m.id) ? 'me' : ''} ${st.sel === m.id ? 'sel' : ''}" data-n="${m.id}" title="${esc(m.name)}${known(m) ? ' — ' + NODE_L[state] : ''}">
       <span class="on-name">${esc(m.name)}</span>
-      ${m.deceased ? `<small>${T("رحمه الله")}</small>` : known(m) && m.contributing ? `<small class="num">${money(m.monthly)}</small>` : ''}
-      ${ch.length ? `<button type="button" class="otog" data-t="${m.id}" title="${closed ? T("إظهار الأبناء") : T("إخفاء الأبناء")}">${closed ? '+' + allBelow(m) : '−'}</button>` : ''}
-    </div>${ch.length && !closed ? `<ul>${ch.map(node).join('')}</ul>` : ''}</li>`;
+      ${m.deceased ? `<small>${isWife(m) ? T("رحمها الله") : T("رحمه الله")}</small>` : known(m) && m.contributing ? `<small class="num">${money(m.monthly)}</small>` : ''}
+      ${mom ? `<small class="omom">${T("أمه:")} ${esc(mom)}</small>` : ''}${tog}</div>`;
+  };
+  const node = (m, mom = '') => {
+    const wives = wivesOf(m.id), ch = kidsOf(m), closed = st.collapsed.has(m.id);
+    const tog = ch.length ? `<button type="button" class="otog" data-t="${m.id}" title="${closed ? T("إظهار الأبناء") : T("إخفاء الأبناء")}">${closed ? '+' + allBelow(m) : '−'}</button>` : '';
+    const top = wives.length ? `<div class="ocouple">${person(m, { tog, mom })}${wives.map(w => `<span class="olink" aria-hidden="true"><i></i><b>♥</b><i></i></span>${person(w)}`).join('')}</div>` : person(m, { tog, mom });
+    return `<li>${top}${ch.length && !closed ? `<ul>${ch.map(k => node(k, wives.length > 1 ? motherOf(k)?.name || '' : '')).join('')}</ul>` : ''}</li>`;
   };
   const panel = () => {
     const m = byId.get(st.sel);
     if (!m) return `<div class="op-empty">${icon('users')}<p>${T("اضغط على أي شخص في الشجرة لعرض تفاصيله")}</p>
       ${manage && !list.length ? `<p class="small">${T("ابدأ برأس العائلة (مثلاً: عائلة فلان، أو الجد رحمه الله) ثم أضف الأبناء تحته")}</p>` : ''}</div>`;
-    const parent = byId.get(m.parent_id);
-    const ch = kids(m.id);
+    const wife = isWife(m), father = wife ? null : fatherOf(m), mother = wife ? null : motherOf(m);
+    const ch = wife ? kidsOf(byId.get(m.spouse_id)).filter(k => motherOf(k)?.id === m.id) : kidsOf(m);
+    const rel = wife ? ` · ${T("زوجة")} ${esc(byId.get(m.spouse_id).name)}` : father ? ` · ${T("ابن/ة")} ${esc(father.name)}${mother ? ` ${T("و")} ${esc(mother.name)}` : ''}` : '';
     const head = `<div class="op-head"><div class="op-av s-${known(m) ? nodeState(m) : 'none'}">${esc(initials(m.name))}</div>
-      <div><b>${esc(m.name)}</b><div class="small muted">${m.deceased ? T("رحمه الله") : known(m) ? NODE_L[nodeState(m)] : T("عضو في الصندوق")}${parent ? ` · ${T("ابن/ة")} ${esc(parent.name)}` : ''}</div></div></div>`;
+      <div><b>${esc(m.name)}</b><div class="small muted">${m.deceased ? (wife ? T("رحمها الله") : T("رحمه الله")) : known(m) ? NODE_L[nodeState(m)] : T("عضو في الصندوق")}${rel}</div></div></div>`;
     if (!known(m)) return head + (ch.length ? `<p class="small muted">${ch.length} ${T("من الأبناء في الشجرة")}</p>` : '');
     const rows = m.contributing ? [
       [T("الاشتراك الشهري"), money(m.monthly)], [T("إجمالي المساهمة"), `<b>${money(m.total_paid)}</b>`],
@@ -443,7 +576,9 @@ VIEWS.members = async (el, _, keep) => {
     return `${head}<div class="op-rows">${rows.map(([l, v]) => `<div class="r"><span>${l}</span><span>${v}</span></div>`).join('')}</div>
       ${m.contributing && m.months ? `<div class="sec-title small">${T("آخر 6 أشهر")}</div>${monthStrip(m.months, 6)}` : ''}
       <div class="op-acts">${m.contributing ? `<button class="btn sm" data-full="${m.id}">${icon('list')}${T("التفاصيل والدفعات")}</button>` : ''}
-        ${manage ? `<button class="btn sm" data-edit="${m.id}">${icon('edit')}${T("تعديل")}</button><button class="btn sm primary" data-add="${m.id}">${icon('plus')}${T("إضافة ابن / ابنة")}</button>` : ''}</div>`;
+        ${manage ? `<button class="btn sm" data-edit="${m.id}">${icon('edit')}${T("تعديل")}</button>
+          ${wife ? `<button class="btn sm primary" data-add="${m.spouse_id}" data-mom="${m.id}">${icon('plus')}${T("إضافة ابن / ابنة")}</button>`
+            : `${!ch.length && !wivesOf(m.id).length && list.some(r => r.id !== m.id && !isWife(r)) ? `<button class="btn sm primary" data-asw="${m.id}">${icon('heart')}${T("ربطها كزوجة (أم) بجانب زوجها")}</button>` : ''}<button class="btn sm" data-wife="${m.id}">${icon('plus')}${T("إضافة زوجة (أم)")}</button><button class="btn sm primary" data-add="${m.id}">${icon('plus')}${T("إضافة ابن / ابنة")}</button>`}` : ''}</div>`;
   };
   const draw = () => {
     el.innerHTML = `${pageHead('users', T("شجرة العائلة"), d.full ? `${list.length} ${T("فرد")} · ${d.totals.contributors} ${T("مساهم")}` : T("أفراد العائلة المسجلون في الصندوق"),
@@ -480,8 +615,13 @@ VIEWS.members = async (el, _, keep) => {
     $('#bOpenAll').onclick = () => { st.collapsed.clear(); redraw(); };
     const reload = () => VIEWS.members(el);
     if (manage) {
-      $('#bAddM').onclick = () => memberForm(null, st.sel, d, reload);
-      $$('[data-add]', el).forEach(b => b.onclick = () => memberForm(null, Number(b.dataset.add), d, reload));
+      $('#bAddM').onclick = () => { const s = byId.get(st.sel); memberForm(null, s && isWife(s) ? s.spouse_id : st.sel, d, reload, s && isWife(s) ? { mother: s.id } : {}); };
+      $$('[data-add]', el).forEach(b => b.onclick = () => memberForm(null, Number(b.dataset.add), d, reload, { mother: Number(b.dataset.mom) || null }));
+      $$('[data-wife]', el).forEach(b => b.onclick = () => memberForm(null, null, d, reload, { role: 'wife', spouse: Number(b.dataset.wife) }));
+      // a mother entered on her own as a family head: put her beside her husband (suggest the head who has children)
+      $$('[data-asw]', el).forEach(b => b.onclick = () => { const me = byId.get(Number(b.dataset.asw));
+        const head = (me && me.parent_id && byId.get(me.parent_id) && !isWife(byId.get(me.parent_id)) ? byId.get(me.parent_id) : null) || roots.find(r => r.id !== me.id && kidsOf(r).length);
+        memberForm(d.members.find(x => x.id === Number(b.dataset.asw)), null, d, reload, { role: 'wife', spouse: head && head.id }); });
       $$('[data-edit]', el).forEach(b => b.onclick = () => memberForm(d.members.find(m => m.id == b.dataset.edit), null, d, reload));
     }
     $$('[data-full]', el).forEach(b => b.onclick = () => memberDetail(Number(b.dataset.full)));
@@ -489,16 +629,27 @@ VIEWS.members = async (el, _, keep) => {
   draw();
 };
 
-function memberForm(m, parentId, d, after) {
+function memberForm(m, parentId, d, after, preset = {}) {
   const now = d.now;
   const descendants = new Set();
-  if (m) { const walk = (id) => d.members.filter(x => x.parent_id === id).forEach(x => { descendants.add(x.id); walk(x.id); }); walk(m.id); }
-  const parents = d.members.filter(x => !m || (x.id !== m.id && !descendants.has(x.id)));
+  if (m) { const walk = (id) => d.members.filter(x => x.parent_id === id || x.spouse_id === id).forEach(x => { if (!descendants.has(x.id)) { descendants.add(x.id); walk(x.id); } }); walk(m.id); }
+  const byId = new Map(d.members.map(x => [x.id, x]));
+  const wifeOf = (x) => x.spouse_id && byId.has(x.spouse_id);
+  // fathers / husbands: anyone who is not a wife, not this member and not under them
+  const parents = d.members.filter(x => !wifeOf(x) && (!m || (x.id !== m.id && !descendants.has(x.id))));
+  const hasWives = m && d.members.some(x => x.spouse_id === m.id);
+  // an older entry made the mother the "parent": show it as father + mother
+  let pSel = m ? m.parent_id : parentId, momSel = m ? m.mother_id : preset.mother;
+  if (pSel && byId.get(pSel) && wifeOf(byId.get(pSel))) { momSel = pSel; pSel = byId.get(pSel).spouse_id; }
+  const role = m && wifeOf(m) ? 'wife' : preset.role || 'child';
   const cats = d.categories.filter(c => c.active || (m && c.id === m.category_id));
   const md = modal(m ? T("تعديل عضو") : T("عضو جديد"), `<form id="fM" autocomplete="off">
     <div class="fgrid">
       <label class="full">${T("الاسم")}<input name="name" required maxlength="100" value="${esc(m?.name || '')}" placeholder="${T("مثال: محمد بن عبدالله، أو: عائلة آل فلان")}"></label>
-      <label>${T("الأب / الأم في الشجرة")}<select name="parent_id"><option value="">${T("— رأس العائلة (بدون أب) —")}</option>${opt(parents, m ? m.parent_id : parentId, x => [x.id, x.name])}</select></label>
+      <label>${T("الصلة في الشجرة")}<select name="role"><option value="child" ${role === 'child' ? 'selected' : ''}>${T("ابن / ابنة (أو رأس عائلة)")}</option>${hasWives ? '' : `<option value="wife" ${role === 'wife' ? 'selected' : ''}>${T("زوجة (أم الأبناء)")}</option>`}</select></label>
+      <label data-r="child">${T("الأب في الشجرة")}<select name="parent_id"><option value="">${T("— رأس العائلة (بدون أب) —")}</option>${opt(parents, pSel, x => [x.id, x.name])}</select></label>
+      <label data-r="mom">${T("الأم")} <span class="opt">${T("(اختياري)")}</span><select name="mother_id"></select></label>
+      <label data-r="wife">${T("الزوج")}<select name="spouse_id"><option value="">— ${T("اختر الزوج")} —</option>${opt(parents.filter(x => !wifeOf(x)), (m && m.spouse_id) || preset.spouse, x => [x.id, x.name])}</select></label>
       <label>${T("فئة الاشتراك")}<select name="category_id"><option value="">—</option>${opt(cats, m ? m.category_id : cats[0]?.id, c => [c.id, `${T(c.name)} — ${money(c.amount)}`])}</select></label>
       ${m ? '' : `<label>${T("مبلغ خاص")} <span class="opt">${T("(اختياري — بدل مبلغ الفئة)")}</span><input name="amount" type="number" step="0.01" min="0" inputmode="decimal"></label>`}
       <label>${T("شهر الانضمام")}<input name="join_month" type="month" value="${m?.join_month || (d.settings.start_month > now ? d.settings.start_month : now)}"></label>
@@ -507,7 +658,8 @@ function memberForm(m, parentId, d, after) {
     </div>
     <div class="row" style="margin:12px 0">
       <label class="check"><input type="checkbox" name="contributing" ${!m || m.contributing ? 'checked' : ''}> ${T("مساهم (يدفع اشتراكاً شهرياً)")}</label>
-      <label class="check"><input type="checkbox" name="guardian_access" ${!m || m.guardian_access ? 'checked' : ''}> ${T("يستطيع الأب / الأم متابعته من حسابه")}</label>
+      <label class="check"><input type="checkbox" name="guardian_access" ${!m || m.guardian_access ? 'checked' : ''}> ${T("يستطيع الأب / الأم متابعته من حسابه")} <span class="opt">${T("(رؤية الدفعات والكشف والإيصالات)")}</span></label>
+      <label class="check"><input type="checkbox" name="guardian_act" ${m?.guardian_act ? 'checked' : ''}> ${T("يستطيع الأب / الأم طلب قرض باسمه")} <span class="opt">${T("(موافقة منفصلة)")}</span></label>
       <label class="check"><input type="checkbox" name="deceased" ${m?.deceased ? 'checked' : ''}> ${T("متوفى (رحمه الله)")}</label>
     </div>
     ${m ? `<div class="sec-title">${icon('coins')}<span class="grow">${T("الاشتراك الشهري الحالي")}: <b>${money(m.monthly)}</b></span><button type="button" class="btn sm" id="bRate">${icon('edit')}${T("تغيير المبلغ")}</button></div>
@@ -515,10 +667,24 @@ function memberForm(m, parentId, d, after) {
     <div class="mf">${m ? `<button type="button" class="btn danger" id="bDelM">${icon('trash')}${T("حذف")}</button><span class="grow"></span>` : ''}<button class="btn primary">${T("حفظ")}</button></div></form>`, { wide: true });
   const f = $('#fM', md.el);
   f.deceased.onchange = () => { if (f.deceased.checked) f.contributing.checked = false; };
+  const guard = () => { f.guardian_act.disabled = !f.guardian_access.checked; if (!f.guardian_access.checked) f.guardian_act.checked = false; };
+  f.guardian_access.onchange = guard; guard();
+  // child: father + (one of his wives as) mother · wife: her husband
+  const sync = () => {
+    const wife = f.role.value === 'wife';
+    $('[data-r=child]', f).hidden = wife; $('[data-r=wife]', f).hidden = !wife; f.spouse_id.required = wife;
+    const pid = Number(f.parent_id.value) || null, cur = Number(f.mother_id.value) || momSel;
+    const moms = pid ? d.members.filter(x => x.spouse_id === pid && (!m || x.id !== m.id)) : [];
+    f.mother_id.innerHTML = `<option value="">— ${T("غير محددة")} —</option>` + opt(moms, cur, x => [x.id, x.name]);
+    $('[data-r=mom]', f).hidden = wife || !moms.length;
+  };
+  f.role.onchange = sync; f.parent_id.onchange = () => { momSel = null; sync(); }; sync();
   f.onsubmit = (e) => {
     e.preventDefault();
     busy(e.submitter, async () => {
-      const body = { ...formObj(f), contributing: f.contributing.checked, guardian_access: f.guardian_access.checked, deceased: f.deceased.checked };
+      const { role: r, ...fo } = formObj(f);
+      const body = { ...fo, ...(r === 'wife' ? { parent_id: '', mother_id: '' } : { spouse_id: '', mother_id: $('[data-r=mom]', f).hidden ? '' : fo.mother_id }),
+        contributing: f.contributing.checked, guardian_access: f.guardian_access.checked, guardian_act: f.guardian_access.checked && f.guardian_act.checked, deceased: f.deceased.checked };
       if (m) await bapi('/fund/members/' + m.id, { method: 'PUT', body }); else await bapi('/fund/members', { method: 'POST', body });
       md.close(); toast(T("تم الحفظ"), 'ok'); after();
     });
@@ -619,7 +785,8 @@ async function loansPage(el, mode) {
   const myBox = mode !== 'req' ? '' : d.mine.length ? `<section class="card"><div class="card-head"><h3>${icon('hand')}${T("طلب قرض")}</h3>
       <button class="btn primary" id="bReq">${icon('plus')}${T("تقديم طلب قرض")}</button></div>
     ${d.mine.map(m => `<div class="summary-box" style="margin-bottom:10px"><div class="r"><span><b>${esc(m.name)}</b>${m.relation === 'child' ? ` <span class="badge info">${T("من أبنائك")}</span>` : ''}</span><span>${ratingBadge(m.rating)}</span></div>
-      <div class="r"><span>${T("مساهماتك")}</span><b>${money(m.total_paid)}</b></div><div class="r"><span>${T("الحد المسموح للقرض")}</span><b>${money(m.loan_limit)}</b></div>
+      <div class="r"><span>${m.relation === 'child' ? T("مساهماته") : T("مساهماتك")}</span><b>${money(m.total_paid)}</b></div><div class="r"><span>${T("الحد المسموح للقرض")} <span class="muted small">(${m.relation === 'child' ? T("من مساهماته هو فقط") : T("من مساهماتك أنت فقط")})</span></span><b>${money(m.loan_limit)}</b></div>
+      ${m.relation === 'child' && !m.guardian_act ? `<div class="r"><span class="muted small">${T("طلب قرض باسمه يحتاج موافقة المشرف")}</span></div>` : ''}
       ${m.flagged ? `<div class="r"><span class="neg-t">${icon('alert')}${T("تعثّر")}: ${flagText(m)}</span><span class="neg-t small">${T("قد يكون سبباً في رفض الطلب")}</span></div>` : ''}
       ${m.loans.filter(l => l.status === 'active').map(l => `<div class="r"><span>${T("قرض قائم")} ${money(l.amount)}</span><b>${T("المتبقي")} ${money(l.remaining)}</b></div>`).join('')}</div>`).join('')}
     ${myReqs.length ? `<div class="sec-title">${icon('list')}<span class="grow">${T("طلباتي")}</span></div><div class="tbl-wrap"><table><tbody>
@@ -701,10 +868,14 @@ async function loansPage(el, mode) {
     ...ben.rows.map(l => [l.name, l.month, l.amount, l.paid, l.remaining, l.paid_pct + '%', l.status === 'paid' ? T("تم السداد") : T("جارٍ السداد")])]);
 }
 function requestForm(d, reqs, after) {
-  const opts = d.mine.filter(m => !reqs.some(r => r.member_id === m.id && r.status === 'pending'));
+  const allowed = d.mine.filter(m => m.relation !== 'child' || m.guardian_act || d.full);
+  if (!allowed.length) return toast(T("طلب قرض باسم الابن يحتاج موافقة المشرف على «التصرف باسمه»"), 'err');
+  const opts = allowed.filter(m => !reqs.some(r => r.member_id === m.id && r.status === 'pending'));
   if (!opts.length) return toast(T("يوجد طلب قرض قيد المراجعة لهذا العضو"), 'err');
   const md = modal(T("تقديم طلب قرض"), `<form autocomplete="off">
-    ${opts.length > 1 ? `<label>${T("الطلب باسم")}<select name="member_id">${opt(opts, opts[0].id, m => [m.id, m.name])}</select></label>` : `<input type="hidden" name="member_id" value="${opts[0].id}">`}
+    <label>${T("القرض باسم")}<select name="member_id" ${opts.length > 1 ? '' : 'disabled'}>${opt(opts, opts[0].id, m => [m.id, `${m.name}${m.relation === 'self' ? ' — ' + T("أنا") : ''} · ${T("الحد")} ${money(m.loan_limit)}`])}</select></label>
+    ${opts.length > 1 ? '' : `<input type="hidden" name="member_id" value="${opts[0].id}">`}
+    <p class="hint" style="margin-top:6px">${icon('info')}<span>${T("القرض وأقساطه يُسجّلان باسم من تختاره فقط، وحدّه يُحسب من مساهماته هو — لا تُجمع مساهمات الأب والأبناء")}.</span></p>
     <div class="fgrid"><label>${T("المبلغ المطلوب")}<input name="amount" type="number" step="1" min="1" inputmode="decimal" required></label>
       <label>${T("مدة السداد (بالأشهر)")}<input name="months" type="number" step="1" min="1" max="120" inputmode="numeric" required value="10"></label>
       <label class="full">${T("سبب الطلب")} <span class="opt">${T("(اختياري)")}</span><input name="reason" maxlength="300"></label></div>
@@ -717,9 +888,10 @@ function requestForm(d, reqs, after) {
     const m = d.mine.find(x => x.id == f.member_id.value);
     const amt = Number(f.amount.value) || 0, months = Number(f.months.value) || 0;
     const warn = [];
-    if (amt > m.loan_limit + 0.005) warn.push(`${T("المبلغ يتجاوز الحد المسموح لك")} (${money(m.loan_limit)} = ${T("ضعف مساهماتك")}). ${T("قد يُرفض الطلب أو يحتاج موافقة خاصة")}.`);
+    const kid = m.relation === 'child';
+    if (amt > m.loan_limit + 0.005) warn.push(`${kid ? T("المبلغ يتجاوز الحد المسموح له") : T("المبلغ يتجاوز الحد المسموح لك")} (${money(m.loan_limit)} = ${kid ? T("ضعف مساهماته") : T("ضعف مساهماتك")}). ${T("قد يُرفض الطلب أو يحتاج موافقة خاصة")}.`);
     if (m.flagged) warn.push(`${T("سجل السداد فيه تعثر")} (${flagText(m)})، ${T("وقد يكون ذلك سبباً في رفض الطلب")}.`);
-    if (m.loans.some(l => l.status === 'active')) warn.push(T("عليك قرض قائم لم يُسدد بالكامل بعد") + '.');
+    if (m.loans.some(l => l.status === 'active')) warn.push((kid ? T("عليه قرض قائم لم يُسدد بالكامل بعد") : T("عليك قرض قائم لم يُسدد بالكامل بعد")) + '.');
     $('#rqInfo', md.el).innerHTML = `<div class="summary-box"><div class="r"><span>${T("الحد المسموح")}</span><b>${money(m.loan_limit)}</b></div>
       ${amt && months ? `<div class="r"><span>${T("القسط الشهري التقريبي")}</span><b>${money(Math.ceil(amt / months))}</b></div>` : ''}</div>
       ${warn.map(w => `<div class="banner warn" style="margin:8px 0 0">${icon('alert')}<span class="grow">${w}</span></div>`).join('')}`;
@@ -909,7 +1081,7 @@ VIEWS.fsettings = async (el) => {
   <section class="card"><h3>${T("شعار الصندوق")}</h3><div id="logoBox" class="logo-box">
     <div class="logo-prev">${logoURL(b) ? `<img src="${logoURL(b)}" alt="">` : `<span class="muted small">${T("لا يوجد شعار")}</span>`}</div>
     <div><div class="row"><label class="btn primary sm">${icon('image')}${logoURL(b) ? T("تغيير الشعار") : T("رفع شعار")}<input type="file" accept="image/png,image/jpeg,image/webp" hidden data-logo-file></label>
-    ${logoURL(b) ? `<button type="button" class="btn sm danger" data-logo-del>${T("حذف الشعار")}</button>` : ''}</div></div></div></section>
+    ${logoURL(b) ? `<button type="button" class="btn sm" data-logo-edit="${logoURL(b)}">${icon('edit')}${T("تعديل الصورة")}</button><button type="button" class="btn sm danger" data-logo-del>${T("حذف الشعار")}</button>` : ''}</div></div></div></section>
   <section class="card"><h3>${icon('eye')}${T("الشفافية والخصوصية")}</h3><form id="fPriv">
     <label class="check"><input type="checkbox" name="show_names" ${s.show_names ? 'checked' : ''}> <span><b>${T("إظهار أسماء الأعضاء ومساهماتهم والتزامهم للجميع في «تقرير الصندوق»")}</b>
       <small class="muted" style="display:block">${T("إذا لم يُفعّل: يرى كل عضو الأرقام والنسب كاملة، وأسماء غيره تظهر «عضو 1، عضو 2…»، ويستطيع طلب عرضها منكم")}</small></span></label>
@@ -1008,8 +1180,26 @@ const ring = (v, size = '') => {
 };
 
 /* ───────────── «أثر الصندوق» ───────────── */
+// the owner can reword the page and change its look; an empty text falls back to these defaults
+const IMPACT_THEMES = { warm: T("دافئ"), brand: T("لون النظام"), ocean: T("أزرق"), forest: T("أخضر"), rose: T("وردي"), gold: T("ذهبي"), night: T("ليلي") };
+const IMPACT_DEF = {
+  kicker: T("أثر الصندوق"), since: T("شهراً من العطاء"), wafa_title: T("نسبة الوفاء"),
+  wafa_text: T("هذه نسبة ما سُدد من الاشتراكات المستحقة منذ البداية — وفاؤكم هو ما يجعل الصندوق جاهزاً حين يحتاجه أحد"),
+  s_collected: T("جمعناه معاً"), s_loans: T("قروض حسنة لأفراد العائلة"), s_repaid: T("أُعيد للصندوق بأمانة"), s_members: T("فرداً في شجرة العائلة"),
+  s_balance: T("جاهز اليوم لمن يحتاج"), s_last: '', goals_title: T("أهداف العائلة"), journey_title: T("رحلتنا عاماً بعد عام"),
+  footer: T("كل ريال في هذا الصندوق يدٌ ممدودة لأحد أفراد العائلة. شكراً لكل من التزم وساهم وكان سبباً في هذا الخير"),
+};
+const IMPACT_FIELDS = [['kicker', T("الشارة أعلى الصفحة")], ['title', T("العنوان الرئيسي")], ['since', T("نص المدة (بعد عدد الأشهر)")], ['wafa_title', T("عنوان نسبة الوفاء")], ['wafa_text', T("شرح نسبة الوفاء"), 1],
+  ['s_collected', T("خانة: ما جمعناه")], ['s_loans', T("خانة: القروض")], ['s_repaid', T("خانة: ما أُعيد")], ['s_members', T("خانة: أفراد الشجرة")], ['s_balance', T("خانة: الرصيد الجاهز")], ['s_last', T("الخانة الأخيرة")],
+  ['goals_title', T("عنوان الأهداف")], ['journey_title', T("عنوان الرحلة")], ['footer', T("الكلمة الختامية"), 1]];
+const IMPACT_SECTIONS = { wafa: T("نسبة الوفاء"), stats: T("خانات الأرقام"), goals: T("أهداف العائلة"), journey: T("رحلتنا عاماً بعد عام"), footer: T("الكلمة الختامية") };
 VIEWS.impact = async (el) => {
   const d = await bapi('/fund/impact');
+  draw(d.page || {});
+  function draw(cfg) {
+  const tx = (k, dflt) => esc((cfg.texts || {})[k] || dflt || IMPACT_DEF[k] || '');
+  const shown = (k) => !(cfg.hide || []).includes(k);
+  const im = cfg.img || {};
   const t = d.totals, f = d.family;
   const canGift = can('fund_collect') || can('fund_manage');
   const stat = (ic, value, label, sub = '') => `<div class="istat"><div class="is-ic">${icon(ic)}</div><b class="num">${value}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
@@ -1031,33 +1221,34 @@ VIEWS.impact = async (el) => {
     </article>`;
   };
   const yrs = [...d.years].reverse();
-  el.innerHTML = `
-    <section class="ihero">
+  el.innerHTML = `<div class="impact th-${esc(cfg.theme || 'warm')}">
+    <section class="ihero sz-${esc(cfg.size || 'm')} ${cfg.image ? 'has-img' : ''}" style="--shade:${(im.shade ?? 45) / 100}">
+      ${cfg.image ? `<img class="ih-img" src="${esc(cfg.image)}" alt="" draggable="false" style="object-position:${im.x ?? 50}% ${im.y ?? 50}%;transform:scale(${(im.zoom ?? 100) / 100});transform-origin:${im.x ?? 50}% ${im.y ?? 50}%">` : ''}
       <div class="ih-logo">${fundLogo()}</div>
-      <div class="ih-t"><span class="ih-k">${icon('heart')}${T("أثر الصندوق")}</span><h1>${esc(T(d.name))}</h1>
+      <div class="ih-t"><span class="ih-k">${icon('heart')}${tx('kicker')}</span><h1>${tx('title', T(d.name))}</h1>
         <p class="ih-motto">«${mottoOf(d)}»</p>
-        <p class="ih-since">${icon('sprout')}${T("معاً منذ")} ${monLabel(d.start_month)} · <b class="num">${d.months}</b> ${T("شهراً من العطاء")}</p></div>
-      <button class="btn sm ih-print no-print" onclick="print()">${icon('printer')}</button>
+        <p class="ih-since">${icon('sprout')}${T("معاً منذ")} ${monLabel(d.start_month)} · <b class="num">${d.months}</b> ${tx('since')}</p></div>
+      <div class="ih-btns no-print">${d.manage ? `<button class="btn sm" id="bPage">${icon('edit')}${T("تعديل الصفحة")}</button>` : ''}<button class="btn sm" onclick="print()">${icon('printer')}</button></div>
     </section>
-    <div class="iwrap">
-      <section class="card iwafa"><div>${ring(t.collection_rate)}</div><div class="grow">
-        <h3>${T("نسبة الوفاء")}</h3>
-        <p>${T("هذه نسبة ما سُدد من الاشتراكات في وقتها منذ البداية — وفاؤكم هو ما يجعل الصندوق جاهزاً حين يحتاجه أحد")}.</p>
-        ${d.closed_months ? `<p class="small"><b class="num">${d.full_months}</b> ${T("شهراً التزم فيها الجميع دون استثناء، من أصل")} <b class="num">${d.closed_months}</b> 🌟</p>` : ''}</div></section>
-      <div class="istats">
-        ${stat('coins', money(t.collected), T("جمعناه معاً"))}
-        ${stat('hand', money(t.loans_issued), T("قروض حسنة لأفراد العائلة"), `${t.loans_count} ${T("قرضاً")} · ${f.borrowers} ${T("مستفيداً")}`)}
-        ${stat('check', money(t.repaid), T("أُعيد للصندوق بأمانة"))}
-        ${stat('users', f.members, T("فرداً في شجرة العائلة"), f.generations > 1 ? `${f.generations} ${T("أجيال")}` : '')}
-        ${stat('wallet', money(t.balance), T("جاهز اليوم لمن يحتاج"))}
-        ${d.gifts_total ? stat('gift', money(d.gifts_total), T("لحملات الخير")) : stat('heart', t.contributors, T("يساهمون كل شهر"))}
-      </div>
-    </div>
-    <section class="card"><div class="card-head"><h3>${icon('target')}${T("أهداف العائلة")}</h3>${d.manage ? `<button class="btn sm primary no-print" id="bGoal">${icon('plus')}${T("هدف جديد")}</button>` : ''}</div>
+    ${shown('wafa') || shown('stats') ? `<div class="iwrap">
+      ${shown('wafa') ? `<section class="card iwafa"><div>${ring(t.collection_rate)}</div><div class="grow">
+        <h3>${tx('wafa_title')}</h3>
+        <p>${tx('wafa_text')}${(cfg.texts || {}).wafa_text ? '' : '.'}</p>
+        ${d.closed_months ? `<p class="small"><b class="num">${d.full_months}</b> ${T("شهراً التزم فيها الجميع دون استثناء، من أصل")} <b class="num">${d.closed_months}</b> 🌟</p>` : ''}</div></section>` : ''}
+      ${shown('stats') ? `<div class="istats">
+        ${stat('coins', money(t.collected), tx('s_collected'))}
+        ${stat('hand', money(t.loans_issued), tx('s_loans'), `${t.loans_count} ${T("قرضاً")} · ${f.borrowers} ${T("مستفيداً")}`)}
+        ${stat('check', money(t.repaid), tx('s_repaid'))}
+        ${stat('users', f.members, tx('s_members'), f.generations > 1 ? `${f.generations} ${T("أجيال")}` : '')}
+        ${stat('wallet', money(t.balance), tx('s_balance'))}
+        ${d.gifts_total ? stat('gift', money(d.gifts_total), tx('s_last', T("لحملات الخير"))) : stat('heart', t.contributors, tx('s_last', T("يساهمون كل شهر")))}
+      </div>` : ''}
+    </div>` : ''}
+    ${shown('goals') ? `<section class="card"><div class="card-head"><h3>${icon('target')}${tx('goals_title')}</h3>${d.manage ? `<button class="btn sm primary no-print" id="bGoal">${icon('plus')}${T("هدف جديد")}</button>` : ''}</div>
       ${goals.length ? `<div class="goals">${goals.map(goalCard).join('')}</div>`
         : `<div class="empty small">${icon('sprout')} ${d.manage ? T("لا توجد أهداف بعد — أضف هدفاً تجتمع عليه العائلة: زواج، تعليم، علاج، أو رصيد تطمئنون به") : T("لا توجد أهداف معلنة بعد")}</div>`}
-    </section>
-    ${yrs.length ? `<section class="card"><h3>${icon('history')}${T("رحلتنا عاماً بعد عام")}</h3><div class="journey">
+    </section>` : ''}
+    ${yrs.length && shown('journey') ? `<section class="card"><h3>${icon('history')}${tx('journey_title')}</h3><div class="journey">
       ${yrs.map(y => `<div class="jy"><div class="jy-dot num">${y.year}</div><div class="jy-b">
         <span>${icon('coins')}${T("جمعنا")} <b class="num">${money(y.collected)}</b></span>
         ${y.loans ? `<span>${icon('hand')}${y.loans} ${T("قرضاً بـ")} <b class="num">${money(y.lent)}</b></span>` : ''}
@@ -1065,14 +1256,79 @@ VIEWS.impact = async (el) => {
         ${y.joined ? `<span>${icon('sprout')}${T("انضم")} <b>${y.joined}</b></span>` : ''}
         ${y.gifts ? `<span>${icon('gift')}${T("للحملات")} <b class="num">${money(y.gifts)}</b></span>` : ''}</div></div>`).join('')}
     </div></section>` : ''}
-    <section class="ifoot">${icon('heart')}<p>${T("كل ريال في هذا الصندوق يدٌ ممدودة لأحد أفراد العائلة. شكراً لكل من التزم وساهم وكان سبباً في هذا الخير")}.</p></section>`;
+    ${shown('footer') ? `<section class="ifoot">${icon('heart')}<p>${tx('footer')}${(cfg.texts || {}).footer ? '' : '.'}</p></section>` : ''}</div>`;
   const reload = () => VIEWS.impact(el);
+  const pb = $('#bPage', el); if (pb) pb.onclick = () => impactEditor(d, cfg, draw, reload);
   const byId = (id) => goals.find(g => g.id === Number(id));
   const add = $('#bGoal'); if (add) add.onclick = () => goalForm(null, reload);
   $$('[data-goal]', el).forEach(b => b.onclick = () => goalForm(byId(b.dataset.goal), reload));
   $$('[data-gift]', el).forEach(b => b.onclick = () => giftForm(byId(b.dataset.gift), reload).catch(fail));
   $$('[data-gifts]', el).forEach(b => b.onclick = () => giftsList(byId(b.dataset.gifts), reload).catch(fail));
+  }
 };
+// the owner's editor: texts / design / sections — the page behind shows every change at once
+function impactEditor(d, saved, draw, reload) {
+  const c = JSON.parse(JSON.stringify(saved || {}));
+  c.texts = c.texts || {}; c.hide = c.hide || []; c.img = c.img || { x: 50, y: 50, zoom: 100, shade: 45 };
+  const md = modal(T("تعديل صفحة أثر الصندوق"), `<form autocomplete="off" class="ied-page">
+    <div class="seg full-seg" style="margin-bottom:12px">${[['t', T("النصوص")], ['d', T("التصميم")], ['s', T("الأقسام")]].map(([k, l], i) => `<label><input type="radio" name="tab" value="${k}" ${i ? '' : 'checked'}><span>${l}</span></label>`).join('')}</div>
+    <div data-pane="t">
+      <p class="hint">${icon('info')}<span>${T("اترك الخانة فارغة ليبقى النص الأصلي (يظهر باهتاً داخلها)")}.</span></p>
+      <div class="fgrid">${IMPACT_FIELDS.map(([k, l, big]) => `<label class="${big ? 'full' : ''}">${l}${big ? `<textarea data-t="${k}" rows="3" placeholder="${esc(IMPACT_DEF[k])}">${esc(c.texts[k] || '')}</textarea>` : `<input data-t="${k}" placeholder="${esc(k === 'title' ? T(d.name) : IMPACT_DEF[k] || T("حسب الحالة"))}" value="${esc(c.texts[k] || '')}">`}</label>`).join('')}
+        <label class="full">${T("العبارة تحت العنوان")} <span class="opt">${T("(تظهر أيضاً في الإيصالات والكشوفات)")}</span><input name="motto" maxlength="200" value="${esc(d.motto || '')}" placeholder="${esc(DEFAULT_MOTTO)}"></label></div></div>
+    <div data-pane="d" hidden>
+      <div class="sec-title">${T("ألوان الصفحة")}</div>
+      <div class="ban-colors">${Object.entries(IMPACT_THEMES).map(([k, l]) => `<label class="bc"><input type="radio" name="theme" value="${k}" ${(c.theme || 'warm') === k ? 'checked' : ''}><span class="fb-slide th-sw th-${k} on"></span><small>${l}</small></label>`).join('')}</div>
+      <div class="sec-title" style="margin-top:12px">${T("حجم رأس الصفحة")}</div>
+      <div class="seg">${[['s', T("صغير")], ['m', T("متوسط")], ['l', T("كبير")]].map(([k, l]) => `<label><input type="radio" name="size" value="${k}" ${(c.size || 'm') === k ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div>
+      <div class="sec-title" style="margin-top:12px">${T("صورة خلفية لرأس الصفحة")}</div>
+      <div class="row"><label class="btn sm">${icon('image')}<span id="ipImgL"></span><input type="file" accept="image/png,image/jpeg,image/webp" hidden id="ipImg"></label><button type="button" class="btn sm ghost" id="ipNoImg">${T("بدون صورة")}</button></div>
+      <div id="ipCtl" class="ban-ctl">
+        <p class="small muted" style="margin:0">${icon('info')} ${T("اسحب الصورة في المعاينة لتحريكها")}</p>
+        <div id="ipPrev" class="ip-prev"></div>
+        <label>${T("تكبير الصورة")}<input type="range" name="zoom" min="100" max="300" step="5" value="${c.img.zoom}"></label>
+        <label>${T("تعتيم الصورة (لوضوح الكتابة)")}<input type="range" name="shade" min="0" max="90" step="5" value="${c.img.shade}"></label></div></div>
+    <div data-pane="s" hidden>
+      <p class="muted small">${T("اختر الأقسام التي تظهر في الصفحة")}</p>
+      ${Object.entries(IMPACT_SECTIONS).map(([k, l]) => `<label class="check"><input type="checkbox" data-sh="${k}" ${c.hide.includes(k) ? '' : 'checked'}> ${l}</label>`).join('')}</div>
+    <div class="mf"><button type="button" class="btn ghost" id="ipReset">${icon('undo')}${T("استعادة الأصل")}</button><span class="grow"></span><button class="btn primary">${icon('check')}${T("حفظ")}</button></div></form>`, { wide: true });
+  const f = $('form', md.el);
+  let saving = false;
+  const read = () => {
+    for (const i of $$('[data-t]', f)) { if (i.value.trim()) c.texts[i.dataset.t] = i.value.trim(); else delete c.texts[i.dataset.t]; }
+    c.theme = f.theme.value; c.size = f.size.value;
+    c.hide = $$('[data-sh]', f).filter(i => !i.checked).map(i => i.dataset.sh);
+    c.img.zoom = Number(f.zoom.value); c.img.shade = Number(f.shade.value);
+  };
+  const preview = () => {
+    read(); draw({ ...c, img: c.img });
+    $('#ipCtl', md.el).hidden = !c.image; $('#ipNoImg', md.el).hidden = !c.image;
+    $('#ipImgL', md.el).textContent = c.image ? T("تغيير الصورة") : T("اختيار صورة");
+    $('#ipPrev', md.el).innerHTML = c.image ? `<div class="ihero sz-s has-img impact th-${esc(c.theme)}" style="--shade:${c.img.shade / 100}"><img class="ih-img" src="${esc(c.image)}" alt="" draggable="false" style="object-position:${c.img.x}% ${c.img.y}%;transform:scale(${c.img.zoom / 100});transform-origin:${c.img.x}% ${c.img.y}%"><div class="ih-t"><h1>${esc(c.texts.title || T(d.name))}</h1></div></div>` : '';
+  };
+  f.addEventListener('input', preview); f.addEventListener('change', preview);
+  $$('[name=tab]', f).forEach(r => r.onchange = () => $$('[data-pane]', f).forEach(p => { p.hidden = p.dataset.pane !== f.tab.value; }));
+  $('#ipImg', md.el).onchange = async (e) => { const file = e.target.files[0]; e.target.value = ''; if (!file) return; try { c.image = await bannerImage(file); c.img = { x: 50, y: 50, zoom: 100, shade: Number(f.shade.value) }; f.zoom.value = 100; preview(); } catch (err) { fail(err); } };
+  $('#ipNoImg', md.el).onclick = () => { delete c.image; preview(); };
+  const pv = $('#ipPrev', md.el); let dg = null;
+  pv.addEventListener('pointerdown', (e) => { if (!c.image) return; const r = pv.getBoundingClientRect(); dg = { sx: e.clientX, sy: e.clientY, x: c.img.x, y: c.img.y, w: r.width, h: r.height }; pv.setPointerCapture(e.pointerId); e.preventDefault(); });
+  pv.addEventListener('pointermove', (e) => { if (!dg) return; const k = 100 / (c.img.zoom / 100);
+    c.img.x = Math.round(Math.min(100, Math.max(0, dg.x - (e.clientX - dg.sx) / dg.w * k))); c.img.y = Math.round(Math.min(100, Math.max(0, dg.y - (e.clientY - dg.sy) / dg.h * k))); preview(); });
+  const stop = () => { dg = null; }; pv.addEventListener('pointerup', stop); pv.addEventListener('pointercancel', stop);
+  $('#ipReset', md.el).onclick = async () => {
+    if (!await confirmBox(T("استعادة الأصل"), `<p>${T("ترجع النصوص والألوان والأقسام كما كانت في الأصل. متابعة؟")}</p>`, T("استعادة"))) return;
+    busy($('#ipReset', md.el), async () => { await bapi('/fund/impact-page', { method: 'PUT', body: {} }); saving = true; md.close(); toast(T("تمت الاستعادة"), 'ok'); reload(); });
+  };
+  f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+    read();
+    await bapi('/fund/impact-page', { method: 'PUT', body: c });
+    if ((f.motto.value.trim() || null) !== (d.motto || null)) await bapi('/fund/settings', { method: 'PUT', body: { motto: f.motto.value } });
+    saving = true; md.close(); toast(T("تم حفظ الصفحة"), 'ok'); reload();
+  }); };
+  // closed without saving → the page goes back to what was saved
+  const watch = setInterval(() => { if (!document.body.contains(md.el)) { clearInterval(watch); if (!saving) draw(saved || {}); } }, 300);
+  preview();
+}
 function goalForm(g, after) {
   const md = modal(g ? T("تعديل الهدف") : T("هدف جديد للعائلة"), `<form autocomplete="off">
     <div class="fgrid">
@@ -1148,7 +1404,7 @@ VIEWS.receipt = async (el, [id]) => {
       ${r.deleted ? `<span class="rc-stamp">${T("ملغى")}</span>` : `<span class="rc-ok">${icon('check')}${T("تم الاستلام")}</span>`}</div>
     <div class="rc-rows">
       ${rcRow(T("استلمنا من"), `${esc(r.member.name)}${r.member.parent ? ` <span class="muted small">${T("ابن/ة")} ${esc(r.member.parent)}</span>` : ''}`)}
-      ${rcRow(T("مقابل"), r.kind === 'dues' ? `${T("اشتراك شهر")} ${monLabel(r.month)}` : `${T("قسط قرض")} — ${monLabel(r.month)}`)}
+      ${rcRow(T("مقابل"), r.kind !== 'dues' ? `${T("قسط قرض")} — ${monLabel(r.month)}` : r.extra ? `${T("مساهمة إضافية")} — ${monLabel(r.month)}` : `${T("اشتراك شهر")} ${monLabel(r.for_month || r.month)}`)}
       ${r.loan ? rcRow(T("المتبقي من القرض بعد هذه الدفعة"), `<span class="num">${money(r.loan.remaining_after)}</span> <span class="muted small">${T("من")} ${money(r.loan.amount)}</span>`) : ''}
       ${rcRow(T("التاريخ"), `<span class="num">${esc(r.created_at.slice(0, 16))}</span>`)}
       ${rcRow(T("المستلم"), esc(r.by || '—'))}
@@ -1162,6 +1418,7 @@ VIEWS.receipt = async (el, [id]) => {
 /* ───────────── monthly statement ───────────── */
 const ST_MSG = {
   full: ['ok', 'check', T("شكراً لك، اشتراك هذا الشهر مكتمل 💚")],
+  late: ['ok', 'check', T("تم سداد اشتراك هذا الشهر بعد موعده — شكراً لك 💚")],
   partial: ['warn', 'alert', T("دُفع جزء من اشتراك الشهر، والمتبقي يُضاف إلى المتأخرات")],
   missed: ['warn', 'alert', T("لم يُسجَّل اشتراك هذا الشهر — نسعد بتسديده متى تيسّر")],
   open: ['info', 'clock', T("الشهر لم ينتهِ بعد، وهذا كشف حتى اليوم")],

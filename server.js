@@ -43,6 +43,30 @@ app.use('/api', (req, res, next) => {
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 // no-cache: browsers re-check the files on each load, so updates show up immediately
+// the site's text files (pages, scripts, styles) go out gzip-compressed — about a quarter of the size, so pages open faster
+// on phones. Each file is compressed once per version and kept in memory; same headers / freshness checks as before.
+const zlib = require('zlib');
+const PUB = path.join(__dirname, 'public');
+const GZ_TYPES = /^\/(?:[\w-]+\.(?:js|css|html|webmanifest))?$/; // top-level files only, no folders, no '..'
+const gzCache = new Map();
+app.use((req, res, next) => {
+  if ((req.method !== 'GET' && req.method !== 'HEAD') || !GZ_TYPES.test(req.path) || !/\bgzip\b/.test(req.get('accept-encoding') || '')) return next();
+  const name = req.path === '/' ? 'index.html' : req.path.slice(1);
+  const file = path.join(PUB, name);
+  let st; try { st = fs.statSync(file); } catch { return next(); }
+  if (!st.isFile()) return next();
+  const ver = `${st.size}-${Math.floor(st.mtimeMs)}`;
+  let e = gzCache.get(name);
+  if (!e || e.ver !== ver) { e = { ver, gz: zlib.gzipSync(fs.readFileSync(file), { level: 9 }), etag: `W/"${ver}-gz"` }; gzCache.set(name, e); }
+  res.setHeader('Vary', 'Accept-Encoding');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('ETag', e.etag);
+  if (req.get('if-none-match') === e.etag) return res.status(304).end();
+  res.type(path.extname(name));
+  res.setHeader('Content-Encoding', 'gzip');
+  res.setHeader('Content-Length', e.gz.length);
+  res.end(req.method === 'HEAD' ? undefined : e.gz);
+});
 app.use(express.static(path.join(__dirname, 'public'), { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
 
 // ───────────────────────── helpers ─────────────────────────
@@ -487,6 +511,7 @@ async function shiftSnap(id) {
     date: s.date, cash_sales: s.cash_sales, card_sales: s.card_sales, apps: Object.fromEntries(apps.map(a => [a.name, a.amount])),
     orders_count: s.orders_count, counted_cash: s.counted_at ? s.counted_cash : null, cash_with_staff: s.counted_at ? s.cash_with_staff : null,
     expected_cash: s.expected_cash, difference: s.counted_at ? s.difference : null, notes: s.notes || '',
+    act_cash: s.act_cash ?? undefined, act_card: s.act_card ?? undefined,
   };
 }
 async function txSnap(t) {
@@ -515,6 +540,17 @@ function parseCount(x, neg = false, biz) {
   if (!Number.isFinite(c) || !Number.isFinite(st) || (!neg && (c < 0 || st < 0))) bad('مبلغ النقد غير صحيح');
   return { counted_cash: r2(c), cash_with_staff: r2(st) };
 }
+// what was actually there at closing (drawer cash incl. the float, card machine total), compared with the cashier system's figures.
+// Shown only: it never changes the balance. undefined = not sent (keep), null = cleared.
+function parseActual(x, biz) {
+  if (biz.cash_count) return undefined; // the drawer-count mode has its own comparison
+  const has = (k) => x[k] !== undefined && x[k] !== null && x[k] !== '';
+  if (!has('act_cash') && !has('act_card')) return 'act_cash' in x || 'act_card' in x ? null : undefined;
+  const c = num(has('act_cash') ? x.act_cash : 0), k = num(has('act_card') ? x.act_card : 0);
+  if (!Number.isFinite(c) || !(k >= 0)) bad('أدخل المبالغ الموجودة فعلاً بشكل صحيح');
+  return { act_cash: r2(c), act_card: r2(k) };
+}
+const saveActual = (id, a) => a === undefined ? null : db.run('UPDATE shifts SET act_cash = ?, act_card = ? WHERE id = ?', a ? a.act_cash : null, a ? a.act_card : null, id);
 async function saveAppSales(shiftId, apps) {
   await db.run('DELETE FROM shift_app_sales WHERE shift_id = ?', shiftId);
   for (const a of apps) if (a.amount > 0 || a.orders_count > 0)
@@ -840,6 +876,7 @@ biz.post('/shifts/close-day', wrap(async (req) => {
   const d = await pastDay(req, x.date);
   const sales = await parseSales(req, x);
   const count = parseCount(x, req.can('shift_reopen'), req.biz);
+  const actual = parseActual(x, req.biz);
   const existing = await dayShift(req, d);
   if (existing && existing.status === 'open') return closeShift(req, existing); // a day the cashier forgot to close
   const before = existing && existing.closed_at ? await shiftSnap(existing.id) : null;
@@ -851,6 +888,7 @@ biz.post('/shifts/close-day', wrap(async (req) => {
     if (count) await db.run('UPDATE shifts SET counted_cash=?, cash_with_staff=?, counted_by=?, counted_at=? WHERE id=?',
       count.counted_cash, count.cash_with_staff, req.user.id, nowLocal(), s.id);
     await saveAppSales(s.id, sales.apps);
+    await saveActual(s.id, actual);
     await recomputeShift(s.id);
     return s.id;
   });
@@ -884,6 +922,7 @@ async function closeShift(req, s) {
   const sales = await parseSales(req, x);
   const count = parseCount(x, req.can('shift_reopen'), req.biz);
   if (!count && req.biz.cash_count && req.biz.cashier_counts) bad('أدخل النقد المعدود في الدرج');
+  const actual = parseActual(x, req.biz);
   await db.tx(async () => {
     await db.run(`UPDATE shifts SET status='closed', closed_by=?, closed_at=?, cash_sales=?, card_sales=?, app_sales=?, orders_count=?, card_fee=?,
       counted_cash=?, cash_with_staff=?, counted_by=?, counted_at=?, notes=? WHERE id=?`,
@@ -891,6 +930,7 @@ async function closeShift(req, s) {
       count ? count.counted_cash : 0, count ? count.cash_with_staff : 0, count ? req.user.id : null, count ? nowLocal() : null,
       String(x.notes || '').slice(0, 1000), s.id);
     await saveAppSales(s.id, sales.apps);
+    await saveActual(s.id, actual);
     await recomputeShift(s.id);
   });
   const after = await db.get('SELECT * FROM shifts WHERE id = ?', s.id);
@@ -942,6 +982,7 @@ biz.put('/shifts/:id', need('shift_reopen'), wrap(async (req) => {
   const x = req.body || {};
   const sales = await parseSales(req, x);
   const count = parseCount(x, req.can('shift_reopen'), req.biz);
+  const actual = parseActual(x, req.biz);
   const date = isDate(x.date) ? x.date : s.date;
   const before = await shiftSnap(s.id);
   await db.tx(async () => {
@@ -953,6 +994,7 @@ biz.put('/shifts/:id', need('shift_reopen'), wrap(async (req) => {
     if (x.clear_count && !count) await db.run('UPDATE shifts SET counted_cash=0, cash_with_staff=0, counted_by=NULL, counted_at=NULL WHERE id=?', s.id);
     if (date !== s.date) await db.run("UPDATE transactions SET date = ? WHERE shift_id = ? AND payment_method = 'drawer'", date, s.id);
     await saveAppSales(s.id, sales.apps);
+    await saveActual(s.id, actual);
     await recomputeShift(s.id);
   });
   await audit(req.biz.id, req.user.id, 'shift_edit', { id: s.id, date, before, after: await shiftSnap(s.id) });

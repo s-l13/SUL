@@ -11,7 +11,7 @@ const FUND_PERMS = {
   fund_view_all: 'رؤية التزام جميع الأعضاء والتقارير الكاملة',
   fund_manage: 'إدارة الصندوق (الأعضاء، الشجرة، المبالغ، القروض، الإعدادات)',
 };
-const FUND_EDIT_ACTIONS = ['fund_goal_update', 'fund_goal_delete', 'fund_gift_delete', 'fund_payment_delete', 'fund_member_update', 'fund_member_delete', 'fund_rate', 'fund_settings', 'fund_category_update', 'fund_loan_update', 'fund_loan_delete', 'fund_account_password'];
+const FUND_EDIT_ACTIONS = ['fund_impact_page', 'fund_goal_update', 'fund_goal_delete', 'fund_gift_delete', 'fund_payment_delete', 'fund_member_update', 'fund_member_delete', 'fund_rate', 'fund_settings', 'fund_category_update', 'fund_loan_update', 'fund_loan_delete', 'fund_account_password'];
 
 const crypto = require('crypto');
 // a fixed but meaningless order for hidden names, so 'member 3' cannot be matched with the 3rd name in the tree
@@ -57,29 +57,49 @@ module.exports = function mountFund(app, biz, ctx) {
     const from = m.join_month && m.join_month > start ? m.join_month : start;
     const months = from <= now ? monthsBetween(from, now) : [];
     const rateAt = (mo) => { let a = 0; for (const r of rates) if (r.from_month <= mo) a = r.amount; return a; };
-    const dues = pays.filter(p => p.kind === 'dues');
-    const paidIn = new Map();
-    for (const p of dues) paidIn.set(p.month, (paidIn.get(p.month) || 0) + p.amount);
-    let cumDue = 0, cumPaid = sum(dues.filter(p => p.month < from), p => p.amount);
+    const allDues = pays.filter(p => p.kind === 'dues');
+    const dues = allDues.filter(p => !p.extra); // an extra (voluntary) contribution never pays a month
+    const dueOf = (mo) => m.contributing && (!m.left_month || mo <= m.left_month) ? rateAt(mo) : 0;
+    // a payment the collector tied to a month (for_month) covers that month; all other money (and any excess)
+    // fills the oldest unpaid months first — so a month paid late counts as paid, and the months not chosen stay late
+    const inRange = new Set(months), tied = new Map(), tiedOnTime = new Map(), freeIn = new Map(), shown = new Map();
+    for (const p of dues) {
+      shown.set(p.month, (shown.get(p.month) || 0) + p.amount);
+      let free = p.amount;
+      if (p.for_month && inRange.has(p.for_month)) {
+        const t = Math.min(free, Math.max(0, dueOf(p.for_month) - (tied.get(p.for_month) || 0)));
+        tied.set(p.for_month, (tied.get(p.for_month) || 0) + t); free -= t;
+        if (p.month === p.for_month) tiedOnTime.set(p.month, (tiedOnTime.get(p.month) || 0) + t);
+      }
+      if (free > 0.0001) freeIn.set(p.month, (freeIn.get(p.month) || 0) + free);
+    }
+    // paid = the money recorded so far covers it (oldest first); on time = it was covered by money paid by the end of that month
+    let pool = sum([...freeIn.values()]), cumDue = 0, cumPaid = sum([...freeIn].filter(([mo]) => mo < from), ([, v]) => v);
     const list = months.map(mo => {
-      const due = m.contributing && (!m.left_month || mo <= m.left_month) ? rateAt(mo) : 0;
-      const paid = paidIn.get(mo) || 0;
-      const prev = cumDue; cumDue += due; cumPaid += paid;
-      const covered = Math.min(due, Math.max(0, cumPaid - prev));
-      const status = due <= 0 ? 'none' : covered >= due - 0.005 ? 'full' : mo === now ? 'open' : covered > 0.005 ? 'partial' : 'missed';
+      const due = dueOf(mo), fixed = tied.get(mo) || 0;
+      const paid = shown.get(mo) || 0;
+      const take = Math.min(due - fixed, Math.max(0, pool)); pool -= take;
+      const covered = fixed + take;
+      const prev = cumDue; cumDue += due - fixed; cumPaid += freeIn.get(mo) || 0;
+      const onTime = (tiedOnTime.get(mo) || 0) + Math.min(due - fixed, Math.max(0, cumPaid - prev));
+      const status = due <= 0 ? 'none' : covered >= due - 0.005 ? (onTime >= due - 0.005 || mo >= now ? 'full' : 'late') : mo === now ? 'open' : covered > 0.005 ? 'partial' : 'missed';
       return { m: mo, due: r2(due), paid: r2(paid), covered: r2(covered), status };
     });
     const closed = list.filter(x => x.m < now && x.due > 0);
     const dueClosed = sum(closed, x => x.due), coveredClosed = sum(closed, x => x.covered);
     let run = 0, maxRun = 0;
-    for (const x of closed) { run = x.status === 'full' ? 0 : run + 1; maxRun = Math.max(maxRun, run); }
-    const late = closed.filter(x => x.status !== 'full').length;
-    const totalPaid = sum(dues, p => p.amount);
+    const paidUp = (x) => x.status === 'full' || x.status === 'late'; // a month paid late still counts as paid
+    for (const x of closed) { run = paidUp(x) ? 0 : run + 1; maxRun = Math.max(maxRun, run); }
+    const late = closed.filter(x => !paidUp(x)).length;
+    const totalPaid = sum(allDues, p => p.amount), extraPaid = sum(allDues.filter(p => p.extra), p => p.amount);
     const commitment = dueClosed > 0 ? coveredClosed / dueClosed : null;
     const curRow = list.find(x => x.m === now);
     return {
-      months: list, monthly: r2(rateAt(now)), total_paid: r2(totalPaid),
-      arrears: r2(Math.max(0, sum(list.filter(x => x.m < now), x => x.due) - totalPaid)),
+      months: list.map(x => { const ex = r2(sum(allDues.filter(p => p.extra && p.month === x.m), p => p.amount)); return { ...x, extra: ex, paid: r2(x.paid + ex) }; }),
+      // money paid ahead: recorded dues not yet used by any month
+      credit: r2(Math.max(0, (totalPaid - extraPaid) - sum(list, x => x.covered))),
+      monthly: r2(rateAt(now)), total_paid: r2(totalPaid), extra_paid: r2(extraPaid),
+      arrears: r2(Math.max(0, sum(list.filter(x => x.m < now), x => x.due) - (totalPaid - extraPaid))),
       this_month: curRow ? { due: curRow.due, paid: curRow.paid, remaining: r2(Math.max(0, curRow.due - curRow.covered)), status: curRow.status } : null,
       due_closed: r2(dueClosed), covered_closed: r2(coveredClosed),
       commitment: commitment === null ? null : Math.round(commitment * 1000) / 10,
@@ -135,7 +155,7 @@ module.exports = function mountFund(app, biz, ctx) {
   function mine(req, members) {
     const own = members.filter(m => m.user_id === req.user.id);
     const ids = new Set(own.map(m => m.id));
-    const kids = members.filter(m => ids.has(m.parent_id) && m.guardian_access && !ids.has(m.id));
+    const kids = members.filter(m => (ids.has(m.parent_id) || ids.has(m.mother_id)) && m.guardian_access && !ids.has(m.id));
     return [...own.map(m => ({ ...m, relation: 'self' })), ...kids.map(m => ({ ...m, relation: 'child' }))];
   }
   const loanLimit = (m, s) => r2(m.total_paid * s.loan_multiplier);
@@ -145,12 +165,12 @@ module.exports = function mountFund(app, biz, ctx) {
     const c = compute(d);
     const settings = { ...d.settings, name: req.biz.name };
     const my = mine(req, c.members).map(m => ({ ...m, loans: c.loans.filter(l => l.member_id === m.id), loan_limit: loanLimit(m, d.settings) }));
-    const banners = await db.all('SELECT id, title, body, color, image FROM fund_banners WHERE business_id = ? AND active = 1 ORDER BY sort, id', req.biz.id);
+    const banners = await db.all('SELECT id, title, body, color, image, layout FROM fund_banners WHERE business_id = ? AND active = 1 ORDER BY sort, id', req.biz.id);
     const pending = viewAll(req) ? (await db.get("SELECT COUNT(*) n FROM fund_loan_requests WHERE business_id = ? AND status = 'pending'", req.biz.id)).n : undefined;
     if (viewAll(req)) return { full: true, settings, categories: d.categories, members: c.members, loans: c.loans, totals: c.totals, series: c.series, now: c.now, mine: my, banners, pending_requests: pending };
     // ordinary member: own figures + fund totals; others appear by name only (family tree)
     return { full: false, settings, totals: c.totals, series: c.series, now: c.now, mine: my, banners,
-      tree: c.members.map(m => ({ id: m.id, name: m.name, parent_id: m.parent_id, contributing: m.contributing, deceased: m.deceased })) };
+      tree: c.members.map(m => ({ id: m.id, name: m.name, parent_id: m.parent_id, spouse_id: m.spouse_id, mother_id: m.mother_id, contributing: m.contributing, deceased: m.deceased })) };
   }));
 
   // monthly collection sheet: what each member owes this month (dues + loan installment) and what was paid
@@ -166,9 +186,11 @@ module.exports = function mountFund(app, biz, ctx) {
       const idx = m.months.findIndex(x => x.m === M);
       const dueM = idx >= 0 ? m.months[idx].due : 0;
       const duePrev = sum(m.months.filter(x => x.m < M), x => x.due);
-      const paidPrev = sum(pays.filter(p => p.kind === 'dues' && p.month < M), p => p.amount);
+      const paidPrev = sum(pays.filter(p => p.kind === 'dues' && !p.extra && p.month < M), p => p.amount);
       const dues = { due: dueM, arrears: r2(Math.max(0, duePrev - paidPrev)), required: r2(Math.max(0, dueM + duePrev - paidPrev)),
-        paid: r2(sum(pays.filter(p => p.kind === 'dues' && p.month === M), p => p.amount)), payments: pays.filter(p => p.kind === 'dues' && p.month === M) };
+        paid: r2(sum(pays.filter(p => p.kind === 'dues' && !p.extra && p.month === M), p => p.amount)), payments: pays.filter(p => p.kind === 'dues' && p.month === M),
+        extra: r2(sum(pays.filter(p => p.kind === 'dues' && p.extra && p.month === M), p => p.amount)),
+        open_months: m.months.filter(x => x.m <= M && x.due - x.covered > 0.005).map(x => ({ m: x.m, left: r2(x.due - x.covered) })) };
       const loans = d.loans.filter(l => l.member_id === m.id && l.start_month <= M && l.issued_date.slice(0, 7) <= M).map(l => {
         const lp = pays.filter(p => p.kind === 'installment' && p.loan_id === l.id);
         const paidBefore = sum(lp.filter(p => p.month < M), p => p.amount);
@@ -202,11 +224,39 @@ module.exports = function mountFund(app, biz, ctx) {
       if (amount > l.amount - paid + 0.005) bad('المبلغ أكبر من المتبقي من القرض ({remaining})', { remaining: r2(l.amount - paid).toFixed(2) });
       loan_id = l.id;
     }
-    const id = await db.insert('INSERT INTO fund_payments (business_id, member_id, month, kind, loan_id, amount, note, created_by) VALUES (?,?,?,?,?,?,?,?)',
-      req.biz.id, m.id, x.month, kind, loan_id, r2(amount), String(x.note || '').trim().slice(0, 300) || null, req.user.id);
-    await audit(req.biz.id, req.user.id, 'fund_payment', { id, member: m.name, month: x.month, kind, amount: r2(amount) });
-    await receiptNotice(req, m, { id, month: x.month, kind, amount: r2(amount) });
-    return { id, no: receiptNo(id) };
+    // dues paid short: the collector may say which months this money is for — the others stay late (one receipt per month)
+    // part (or all) of the money as an extra contribution: raises the member's total (and loan right), pays no month
+    const extra = kind === 'dues' && x.extra !== undefined && x.extra !== '' && x.extra !== null ? r2(num(x.extra)) : 0;
+    if (!(extra >= 0) || extra > r2(amount) + 0.005) bad('المساهمة الإضافية يجب أن تكون بين صفر والمبلغ المدفوع');
+    const dueAmount = r2(amount - extra);
+    let parts = dueAmount > 0.005 ? [{ for_month: null, amount: dueAmount }] : [];
+    if (kind === 'dues' && dueAmount > 0.005 && Array.isArray(x.months) && x.months.length) {
+      if (x.months.length > 120) bad('عدد الشهور كبير جداً');
+      const cm = compute(await load(req.biz.id)).members.find(q => q.id === m.id);
+      const left = new Map((cm ? cm.months : []).map(q => [q.m, r2(q.due - q.covered)]));
+      let rest = dueAmount; parts = [];
+      for (const mo of [...new Set(x.months.map(String))].sort()) {
+        if (!isMonth(mo) || mo > x.month || !(left.get(mo) > 0.005)) bad('لا يوجد مبلغ مستحق في شهر {month}', { month: mo });
+        if (rest <= 0.005) break;
+        const a = r2(Math.min(rest, left.get(mo)));
+        parts.push({ for_month: mo, amount: a }); rest = r2(rest - a);
+      }
+      if (rest > 0.005) parts.push({ for_month: null, amount: rest });
+    }
+    if (extra > 0.005) parts.push({ for_month: null, amount: extra, extra: 1 });
+    const note = String(x.note || '').trim().slice(0, 300) || null;
+    const ids = await db.tx(async () => {
+      const out = [];
+      for (const pt of parts) out.push(await db.insert('INSERT INTO fund_payments (business_id, member_id, month, kind, loan_id, amount, note, created_by, for_month, extra) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        req.biz.id, m.id, x.month, kind, loan_id, pt.amount, note, req.user.id, pt.for_month, pt.extra || 0));
+      return out;
+    });
+    for (const [i, id] of ids.entries()) {
+      const pt = parts[i];
+      await audit(req.biz.id, req.user.id, 'fund_payment', { id, member: m.name, month: x.month, kind: pt.extra ? 'extra' : kind, amount: pt.amount, ...(pt.for_month ? { for_month: pt.for_month } : {}) });
+      await receiptNotice(req, m, { id, month: pt.for_month || x.month, kind, amount: pt.amount });
+    }
+    return { id: ids[0], no: receiptNo(ids[0]), ids, nos: ids.map(receiptNo) };
   }));
   biz.delete('/fund/payments/:id', need('fund_collect', 'fund_manage'), wrap(async (req) => {
     const p = await db.get('SELECT p.*, m.name member FROM fund_payments p JOIN fund_members m ON m.id = p.member_id WHERE p.id = ? AND p.business_id = ? AND p.deleted_at IS NULL', idOf(req.params.id), req.biz.id);
@@ -239,26 +289,48 @@ module.exports = function mountFund(app, biz, ctx) {
     for (let p = parentId, i = 0; p && i < 500; i++) { if (p === selfId) bad('لا يمكن أن يكون العضو أباً لنفسه أو لأحد آبائه'); p = all.find(x => x.id === p)?.parent_id; }
     return parentId;
   }
+  // a wife / mother is linked to her husband (spouse_id) and stands beside him in the tree; a child may name
+  // the mother (mother_id) among the wives of the father. A wife has no father link of her own here.
+  async function checkFamily(req, x, selfId, parent, sent) {
+    const all = await db.all('SELECT id, parent_id, spouse_id FROM fund_members WHERE business_id = ? AND deleted_at IS NULL', req.biz.id);
+    const spouse = idOf(x.spouse_id) || null;
+    if (spouse) {
+      const h = all.find(m => m.id === spouse);
+      if (!h || spouse === selfId) bad('الزوج غير موجود');
+      if (h.spouse_id) bad('اختر الزوج (رب الأسرة) وليس زوجة أخرى');
+      if (selfId && all.some(m => m.spouse_id === selfId)) bad('هذا العضو له زوجة في الشجرة — لا يمكن جعله زوجة');
+      for (let p = spouse, i = 0; p && i < 500; i++) { if (p === selfId) bad('لا يمكن أن يكون الزوج من أبناء العضو نفسه'); p = all.find(m => m.id === p)?.parent_id; }
+      return { parent_id: null, spouse_id: spouse, mother_id: null };
+    }
+    let mother = idOf(x.mother_id) || null;
+    if (mother) {
+      const w = all.find(m => m.id === mother);
+      if (!w || !parent || w.spouse_id !== parent) { if (sent) bad('الأم يجب أن تكون زوجة للأب المختار'); mother = null; }
+    }
+    return { parent_id: parent, spouse_id: null, mother_id: mother };
+  }
   const snapMember = async (id) => {
     const m = await db.get('SELECT * FROM fund_members WHERE id = ?', id);
+    const nameOf = async (k) => k ? (await db.get('SELECT name FROM fund_members WHERE id = ?', k))?.name || '' : '';
     const par = m.parent_id && await db.get('SELECT name FROM fund_members WHERE id = ?', m.parent_id);
     const cat = m.category_id && await db.get('SELECT name FROM fund_categories WHERE id = ?', m.category_id);
-    return { name: m.name, parent: par?.name || '', category: cat?.name || '', contributing: m.contributing, deceased: m.deceased, join_month: m.join_month || '', left_month: m.left_month || '', guardian_access: m.guardian_access, notes: m.notes || '' };
+    return { name: m.name, parent: par?.name || '', ...(m.spouse_id ? { spouse: await nameOf(m.spouse_id) } : {}), ...(m.mother_id ? { mother: await nameOf(m.mother_id) } : {}), category: cat?.name || '', contributing: m.contributing, deceased: m.deceased, join_month: m.join_month || '', left_month: m.left_month || '', guardian_access: m.guardian_access, guardian_act: m.guardian_act ? 1 : 0, notes: m.notes || '' };
   };
   biz.post('/fund/members', need('fund_manage'), wrap(async (req) => {
     const x = req.body || {};
     const s = await db.get('SELECT * FROM fund_settings WHERE business_id = ?', req.biz.id);
     const name = String(x.name || '').trim().slice(0, 100);
     if (!name) bad('الاسم مطلوب');
-    const parent = await checkParent(req, idOf(x.parent_id), 0);
+    const fam = await checkFamily(req, x, 0, await checkParent(req, idOf(x.parent_id), 0), true);
     const contributing = x.contributing === false || x.contributing === 0 || x.contributing === '0' ? 0 : 1;
     const cat = idOf(x.category_id) && await db.get('SELECT * FROM fund_categories WHERE id = ? AND business_id = ?', idOf(x.category_id), req.biz.id);
     const join = isMonth(x.join_month) ? x.join_month : (s.start_month > cur() ? s.start_month : cur());
     let amount = x.amount === undefined || x.amount === '' || x.amount === null ? (cat ? cat.amount : NaN) : num(x.amount);
     if (contributing && !(amount >= 0)) bad('حدد فئة الاشتراك أو المبلغ الشهري');
     const id = await db.tx(async () => {
-      const mid = await db.insert('INSERT INTO fund_members (business_id, name, parent_id, category_id, contributing, join_month, guardian_access, notes, deceased) VALUES (?,?,?,?,?,?,?,?,?)',
-        req.biz.id, name, parent, cat ? cat.id : null, contributing, join, x.guardian_access === false || x.guardian_access === 0 ? 0 : 1, String(x.notes || '').slice(0, 500) || null, x.deceased ? 1 : 0);
+      const follow = x.guardian_access === false || x.guardian_access === 0 ? 0 : 1;
+      const mid = await db.insert('INSERT INTO fund_members (business_id, name, parent_id, spouse_id, mother_id, category_id, contributing, join_month, guardian_access, guardian_act, notes, deceased) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        req.biz.id, name, fam.parent_id, fam.spouse_id, fam.mother_id, cat ? cat.id : null, contributing, join, follow, follow && x.guardian_act && x.guardian_act !== '0' ? 1 : 0, String(x.notes || '').slice(0, 500) || null, x.deceased ? 1 : 0);
       if (contributing) await db.insert('INSERT INTO fund_rates (member_id, from_month, amount) VALUES (?,?,?)', mid, join, r2(amount));
       return mid;
     });
@@ -271,14 +343,16 @@ module.exports = function mountFund(app, biz, ctx) {
     const x = { ...m, ...(req.body || {}) };
     const name = String(x.name || '').trim().slice(0, 100);
     if (!name) bad('الاسم مطلوب');
-    const parent = await checkParent(req, idOf(x.parent_id), m.id);
+    const fam = await checkFamily(req, x, m.id, await checkParent(req, idOf(x.parent_id), m.id), req.body && 'mother_id' in req.body);
     const cat = idOf(x.category_id) && await db.get('SELECT id FROM fund_categories WHERE id = ? AND business_id = ?', idOf(x.category_id), req.biz.id);
     if (x.join_month && !isMonth(x.join_month)) bad('شهر الانضمام غير صحيح');
     if (x.left_month && !isMonth(x.left_month)) bad('شهر الخروج غير صحيح');
     const before = await snapMember(m.id);
     const flag = (v) => v === false || v === 0 || v === '0' ? 0 : 1;
-    await db.run('UPDATE fund_members SET name=?, parent_id=?, category_id=?, contributing=?, join_month=?, left_month=?, guardian_access=?, notes=?, deceased=? WHERE id=?',
-      name, parent, cat ? cat.id : null, flag(x.contributing), x.join_month || null, x.left_month || null, flag(x.guardian_access), String(x.notes || '').slice(0, 500) || null, x.deceased && x.deceased !== '0' ? 1 : 0, m.id);
+    // acting in the child's name (loan requests) is a separate approval, and needs following on
+    const act = flag(x.guardian_access) && x.guardian_act && x.guardian_act !== '0' ? 1 : 0;
+    await db.run('UPDATE fund_members SET name=?, parent_id=?, spouse_id=?, mother_id=?, category_id=?, contributing=?, join_month=?, left_month=?, guardian_access=?, guardian_act=?, notes=?, deceased=? WHERE id=?',
+      name, fam.parent_id, fam.spouse_id, fam.mother_id, cat ? cat.id : null, flag(x.contributing), x.join_month || null, x.left_month || null, flag(x.guardian_access), act, String(x.notes || '').slice(0, 500) || null, x.deceased && x.deceased !== '0' ? 1 : 0, m.id);
     // a member who starts contributing needs a monthly amount
     if (flag(x.contributing) && !(await db.get('SELECT 1 x FROM fund_rates WHERE member_id = ?', m.id))) {
       const c = cat && await db.get('SELECT amount FROM fund_categories WHERE id = ?', cat.id);
@@ -293,8 +367,10 @@ module.exports = function mountFund(app, biz, ctx) {
     if (await db.get('SELECT 1 x FROM fund_payments WHERE member_id = ? AND deleted_at IS NULL', m.id) || await db.get('SELECT 1 x FROM fund_loans WHERE member_id = ? AND deleted_at IS NULL', m.id))
       bad('لا يمكن حذف عضو له دفعات أو قروض — حدّد «شهر الخروج» بدلاً من ذلك');
     if (await db.get('SELECT 1 x FROM fund_members WHERE parent_id = ? AND deleted_at IS NULL', m.id)) bad('لا يمكن حذف عضو له أبناء في الشجرة — انقل الأبناء أولاً');
+    if (await db.get('SELECT 1 x FROM fund_members WHERE spouse_id = ? AND deleted_at IS NULL', m.id)) bad('لا يمكن حذف عضو له زوجة في الشجرة — احذف الزوجة أو عدّلها أولاً');
     const before = await snapMember(m.id);
     await db.run('UPDATE fund_members SET deleted_at = ?, user_id = NULL WHERE id = ?', ctx.nowLocal(), m.id);
+    await db.run('UPDATE fund_members SET mother_id = NULL WHERE mother_id = ?', m.id);
     await audit(req.biz.id, req.user.id, 'fund_member_delete', { before });
     return { ok: true };
   }));
@@ -606,6 +682,7 @@ module.exports = function mountFund(app, biz, ctx) {
     const c = compute(d);
     const m = mine(req, c.members).find(y => y.id === idOf(x.member_id)) || (viewAll(req) && c.members.find(y => y.id === idOf(x.member_id)));
     if (!m) throw new HttpError(403, 'يمكنك طلب قرض لنفسك أو لأحد أبنائك فقط');
+    if (m.relation === 'child' && !m.guardian_act && !viewAll(req)) throw new HttpError(403, 'طلب قرض باسم الابن يحتاج موافقة المشرف على «التصرف باسمه»');
     const amount = num(x.amount), months = parseInt(x.months);
     if (!(amount > 0)) bad('مبلغ القرض يجب أن يكون أكبر من صفر');
     if (!(months >= 1 && months <= 120)) bad('مدة السداد بين شهر و 120 شهراً');
@@ -666,8 +743,8 @@ module.exports = function mountFund(app, biz, ctx) {
   // who hears about a member: the member's own account, or the parent who follows them when they have none
   async function recipientsOf(m) {
     if (m.user_id) return [{ uid: m.user_id, self: true }];
-    if (m.guardian_access && m.parent_id) {
-      const p = await db.get('SELECT user_id FROM fund_members WHERE id = ? AND deleted_at IS NULL', m.parent_id);
+    if (m.guardian_access) for (const pid of [m.parent_id, m.mother_id].filter(Boolean)) { // the father, else the mother
+      const p = await db.get('SELECT user_id FROM fund_members WHERE id = ? AND deleted_at IS NULL', pid);
       if (p && p.user_id) return [{ uid: p.user_id, self: false }];
     }
     return [];
@@ -697,7 +774,7 @@ module.exports = function mountFund(app, biz, ctx) {
     }
     const parent = m.parent_id ? d.members.find(x => x.id === m.parent_id) : null;
     return { no: receiptNo(p.id), id: p.id, fund: req.biz.name, motto: d.settings.motto, member: { id: m.id, name: m.name, parent: parent?.name || '' },
-      kind: p.kind, month: p.month, amount: p.amount, note: p.note, created_at: p.created_at, by: by?.name || '', deleted: !!p.deleted_at, loan,
+      kind: p.kind, extra: !!p.extra, month: p.month, for_month: p.for_month || null, amount: p.amount, note: p.note, created_at: p.created_at, by: by?.name || '', deleted: !!p.deleted_at, loan,
       now: { arrears: m.arrears ?? null, total_paid: m.total_paid ?? null, commitment: m.commitment ?? null } };
   }));
 
@@ -770,6 +847,32 @@ module.exports = function mountFund(app, biz, ctx) {
   // ── impact of the fund + its goals (every account; no names) ──
   const GOAL_KINDS = ['campaign', 'balance', 'collected', 'members'];
   const GOAL_COLORS = ['sunset', 'rose', 'gold', 'forest', 'ocean', 'brand'];
+  // the owner's wording and look of «أثر الصندوق»: texts (empty = the default), colours, header picture, sections shown
+  const PAGE_TEXTS = { kicker: 40, title: 80, since: 60, wafa_title: 60, wafa_text: 300, s_collected: 60, s_loans: 60, s_repaid: 60, s_members: 60, s_balance: 60, s_last: 60,
+    goals_title: 60, journey_title: 60, footer: 400 };
+  const PAGE_THEMES = ['warm', 'brand', 'ocean', 'forest', 'rose', 'gold', 'night'];
+  const PAGE_SECTIONS = ['wafa', 'stats', 'goals', 'journey', 'footer'];
+  biz.put('/fund/impact-page', need('fund_manage'), wrap(async (req) => {
+    const x = req.body || {};
+    const s = await db.get('SELECT impact_page FROM fund_settings WHERE business_id = ?', req.biz.id);
+    let before = {}; try { before = JSON.parse(s?.impact_page || '{}') || {}; } catch { }
+    const n = (v, a, b, dflt) => { v = Number(v); return Number.isFinite(v) ? Math.round(Math.min(b, Math.max(a, v))) : dflt; };
+    const page = { texts: {}, hide: [] };
+    for (const [k, max] of Object.entries(PAGE_TEXTS)) { const v = String(x.texts?.[k] ?? '').trim().slice(0, max); if (v) page.texts[k] = v; }
+    page.theme = PAGE_THEMES.includes(x.theme) ? x.theme : 'warm';
+    page.size = ['s', 'm', 'l'].includes(x.size) ? x.size : 'm';
+    page.hide = PAGE_SECTIONS.filter(k => Array.isArray(x.hide) && x.hide.includes(k));
+    if (x.image) {
+      if (!IMG_RE.test(x.image) || x.image.length > 900 * 1024) bad('الصورة غير مدعومة أو حجمها كبير');
+      page.image = x.image; page.img = { x: n(x.img?.x, 0, 100, 50), y: n(x.img?.y, 0, 100, 50), zoom: n(x.img?.zoom, 100, 300, 100), shade: n(x.img?.shade, 0, 90, 45) };
+    }
+    const json = JSON.stringify(page);
+    if (json.length > 1000 * 1024) bad('حجم بيانات الصفحة كبير جداً');
+    await db.run('UPDATE fund_settings SET impact_page = ? WHERE business_id = ?', json, req.biz.id);
+    const brief = (p) => ({ texts: Object.keys(p.texts || {}).length, theme: p.theme || 'warm', size: p.size || 'm', image: p.image ? 'صورة' : '', hidden: (p.hide || []).join('، ') });
+    await audit(req.biz.id, req.user.id, 'fund_impact_page', { before: brief(before), after: brief(page) });
+    return { ok: true };
+  }));
   biz.get('/fund/impact', wrap(async (req) => {
     const bid = req.biz.id;
     const d = await load(bid);
@@ -806,8 +909,9 @@ module.exports = function mountFund(app, biz, ctx) {
     }
     // months in which every contributor paid in full
     const closed = c.series.map(s => s.m).filter(mo => mo < c.now);
-    const fullMonths = closed.filter(mo => { const rows = c.members.map(m => m.months.find(x => x.m === mo)).filter(x => x && x.due > 0); return rows.length && rows.every(x => x.status === 'full'); }).length;
-    return { name: req.biz.name, motto: d.settings.motto, start_month: d.settings.start_month, now: c.now, months: c.totals.months,
+    const fullMonths = closed.filter(mo => { const rows = c.members.map(m => m.months.find(x => x.m === mo)).filter(x => x && x.due > 0); return rows.length && rows.every(x => x.status === 'full' || x.status === 'late'); }).length;
+    let page = {}; try { page = JSON.parse(d.settings.impact_page || '{}') || {}; } catch { }
+    return { page, name: req.biz.name, motto: d.settings.motto, start_month: d.settings.start_month, now: c.now, months: c.totals.months,
       totals: { collected: c.totals.collected, balance: c.totals.balance, loans_issued: c.totals.loans_issued, loans_count: c.totals.loans_count, repaid: c.totals.installments,
         contributors: c.totals.contributors, collection_rate: c.totals.collection_rate },
       family: { members: d.members.length, living: d.members.filter(m => !m.deceased).length, generations, borrowers: new Set(d.loans.map(l => l.member_id)).size },
@@ -889,7 +993,10 @@ module.exports = function mountFund(app, biz, ctx) {
   const IMG_RE = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/;
   const COLORS = ['brand', 'sunset', 'ocean', 'forest', 'rose', 'gold', 'night'];
   const bannerData = (x, old = {}) => {
-    const v = { title: String(x.title ?? old.title ?? '').trim().slice(0, 120) || null, body: String(x.body ?? old.body ?? '').trim().slice(0, 400) || null,
+    const L = x.layout && typeof x.layout === 'object' ? x.layout : (() => { try { return JSON.parse(old.layout || '{}'); } catch { return {}; } })();
+    const clamp = (n, a, b, d) => { n = Number(n); return Number.isFinite(n) ? Math.round(Math.min(b, Math.max(a, n))) : d; };
+    const layout = JSON.stringify({ size: ['s', 'm', 'l'].includes(L.size) ? L.size : 'm', x: clamp(L.x, 0, 100, 50), y: clamp(L.y, 0, 100, 50), zoom: clamp(L.zoom, 100, 300, 100), shade: clamp(L.shade, 0, 90, 55) });
+    const v = { layout, title: String(x.title ?? old.title ?? '').trim().slice(0, 120) || null, body: String(x.body ?? old.body ?? '').trim().slice(0, 400) || null,
       color: COLORS.includes(x.color) ? x.color : (old.color || 'brand'), active: x.active === undefined ? (old.active ?? 1) : (x.active ? 1 : 0), sort: parseInt(x.sort ?? old.sort ?? 0) || 0,
       image: x.image === undefined ? (old.image ?? null) : (x.image || null) };
     if (v.image && (!IMG_RE.test(v.image) || v.image.length > 900 * 1024)) bad('الصورة غير مدعومة أو حجمها كبير');
@@ -899,7 +1006,7 @@ module.exports = function mountFund(app, biz, ctx) {
   biz.get('/fund/banners', need('fund_manage'), wrap((req) => db.all('SELECT * FROM fund_banners WHERE business_id = ? ORDER BY sort, id', req.biz.id)));
   biz.post('/fund/banners', need('fund_manage'), wrap(async (req) => {
     const v = bannerData(req.body || {});
-    const id = await db.insert('INSERT INTO fund_banners (business_id, title, body, color, image, active, sort) VALUES (?,?,?,?,?,?,?)', req.biz.id, v.title, v.body, v.color, v.image, v.active, v.sort);
+    const id = await db.insert('INSERT INTO fund_banners (business_id, title, body, color, image, active, sort, layout) VALUES (?,?,?,?,?,?,?,?)', req.biz.id, v.title, v.body, v.color, v.image, v.active, v.sort, v.layout);
     await audit(req.biz.id, req.user.id, 'fund_banner', { after: { title: v.title || '', body: v.body || '', image: v.image ? 'صورة' : '' } });
     return { id };
   }));
@@ -907,7 +1014,7 @@ module.exports = function mountFund(app, biz, ctx) {
     const b = await db.get('SELECT * FROM fund_banners WHERE id = ? AND business_id = ?', idOf(req.params.id), req.biz.id);
     if (!b) throw new HttpError(404, 'غير موجود');
     const v = bannerData(req.body || {}, b);
-    await db.run('UPDATE fund_banners SET title=?, body=?, color=?, image=?, active=?, sort=? WHERE id=?', v.title, v.body, v.color, v.image, v.active, v.sort, b.id);
+    await db.run('UPDATE fund_banners SET title=?, body=?, color=?, image=?, active=?, sort=?, layout=? WHERE id=?', v.title, v.body, v.color, v.image, v.active, v.sort, v.layout, b.id);
     await audit(req.biz.id, req.user.id, 'fund_banner', { before: { title: b.title || '', body: b.body || '', active: b.active }, after: { title: v.title || '', body: v.body || '', active: v.active } });
     return { ok: true };
   }));
@@ -936,8 +1043,9 @@ module.exports = function mountFund(app, biz, ctx) {
     const members = order.map(m => ({ ...label(m), mine: own.has(m.id), monthly: m.monthly, total_paid: m.total_paid, share: m.share, commitment: m.commitment,
       rating: m.rating, late_months: m.late_months, arrears: m.arrears, left: !!m.left_month })).sort((x, y) => y.total_paid - x.total_paid);
     // families (a head with everyone under them) — named like the people
-    const kids = (id) => c.members.filter(m => m.parent_id === id), below = (m) => [m, ...kids(m.id).flatMap(below)];
-    const tops = c.members.filter(m => !m.parent_id || !c.members.some(q => q.id === m.parent_id));
+    const up = (m) => m.spouse_id && c.members.some(q => q.id === m.spouse_id) ? m.spouse_id : m.parent_id; // a wife belongs to her husband's family
+    const kids = (id) => c.members.filter(m => up(m) === id), below = (m) => [m, ...kids(m.id).flatMap(below)];
+    const tops = c.members.filter(m => !up(m) || !c.members.some(q => q.id === up(m)));
     const fno = new Map(); let fi = 0;
     const families = tops.flatMap(t => !t.contributing && kids(t.id).length ? kids(t.id) : [t]).map(h => {
       const all = below(h), payers = all.filter(m => m.contributing);

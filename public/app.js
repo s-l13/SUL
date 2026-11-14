@@ -49,6 +49,7 @@ const ICONS = {
   chevR: '<path d="m9 18 6-6-6-6"/>',
   printer: '<path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>',
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
+  share: '<path d="M8 10H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-2M12 15V2M8 6l4-4 4 4"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
   key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
@@ -112,6 +113,13 @@ new MutationObserver(() => document.querySelectorAll('input[type=date]').forEach
   .observe(document.documentElement, { childList: true, subtree: true });
 document.addEventListener('input', (e) => { if (e.target.type === 'date') dayTag(e.target); });
 document.addEventListener('change', (e) => { if (e.target.type === 'date') dayTag(e.target); });
+// tapping a date / month field — or its label, icon or weekday — always opens the calendar
+document.addEventListener('click', (e) => {
+  // a tap on the label / weekday reaches the field as a click too, so the field alone is handled
+  const i = e.target;
+  if (!i.matches || !i.matches('input[type=date],input[type=month]') || i.disabled || i.readOnly || typeof i.showPicker !== 'function') return;
+  try { i.showPicker(); } catch { }
+});
 const timeOf = (s) => s ? s.slice(11, 16) : '';
 const opt = (list, sel, f = x => [x.id, T(x.name)]) => list.map(x => { const [v, l] = f(x); return `<option value="${esc(v)}" ${String(v) === String(sel ?? '') ? 'selected' : ''}>${esc(l)}</option>`; }).join('');
 const formObj = (form) => Object.fromEntries(new FormData(form).entries());
@@ -205,7 +213,7 @@ function showLogin() {
     <div class="err" id="lerr"></div>
     <button class="btn primary block">${T("دخول")}</button>
     <button type="button" class="btn sm ghost block" id="bForgot" style="margin-top:10px">${T("نسيت كلمة المرور؟")}</button>
-    <div class="login-tools">${langBtn('btn sm ghost')}${themeBtn()}</div></form></div>`;
+    <div class="login-tools">${langBtn('btn sm ghost')}${themeBtn()}${installBtn('btn sm ghost')}</div></form></div>`;
   $('#fLogin').onsubmit = async (e) => {
     e.preventDefault();
     try { await api('/login', { method: 'POST', body: formObj(e.target) }); await boot(); }
@@ -222,6 +230,28 @@ function showLogin() {
   };
   $('#fLogin input').focus();
 }
+
+/* ───── put the site on the phone's home screen like an app ───── */
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; });
+const installBtn = (cls = 'btn sm') => isStandalone() ? '' : `<button type="button" class="${cls}" data-install>${icon('download')}${T("تثبيت على الجوال")}</button>`;
+async function installApp() {
+  if (installEvt) { installEvt.prompt(); try { await installEvt.userChoice; } catch { } installEvt = null; return; }
+  const ios = isIOS(), safari = ios && !/crios|fxios|edgios/i.test(navigator.userAgent);
+  const share = `<span class="kbd">${icon('share')}</span>`;
+  modal(T("تثبيت النظام على الجوال"), `<div class="install">
+    ${ios ? `<ol>
+      ${safari ? '' : `<li>${T("افتح الموقع في متصفح")} <b>Safari</b> ${T("(أو اضغط زر المشاركة في Chrome إن وُجد)")}</li>`}
+      <li>${T("اضغط زر المشاركة")} ${share} ${T("أسفل الشاشة (أو أعلاها في الآيباد)")}</li>
+      <li>${T("مرّر للأسفل واختر")} <b>«${T("إضافة إلى الشاشة الرئيسية")}»</b> ${icon('plus')}</li>
+      <li>${T("اضغط")} <b>«${T("إضافة")}»</b> — ${T("يظهر النظام كأيقونة بين البرامج ويفتح بملء الشاشة")}</li></ol>`
+    : `<ol><li>${T("افتح قائمة المتصفح")} <span class="kbd">⋮</span></li><li>${T("اختر")} <b>«${T("تثبيت التطبيق")}»</b> ${T("أو")} <b>«${T("إضافة إلى الشاشة الرئيسية")}»</b></li><li>${T("اضغط")} <b>«${T("تثبيت")}»</b></li></ol>`}
+    <p class="hint">${icon('info')}<span>${T("بعد التثبيت سجّل الدخول مرة واحدة من الأيقونة الجديدة")}.</span></p></div>
+    <div class="mf"><button class="btn primary block" data-x>${T("تم")}</button></div>`);
+}
+document.addEventListener('click', (e) => { if (e.target.closest('[data-install]')) setTimeout(installApp, 0); }); // after this tap has finished
 
 // still on the factory password: nothing else is allowed until it is changed
 function forcePasswordChange() {
@@ -296,6 +326,7 @@ function renderShell() {
       <div class="side-foot">
         <div class="me"><div class="avatar">${esc(initials(S.me.user.name))}</div><div><b>${esc(S.me.user.name)}</b><span>${role}</span></div></div>
         <button class="btn sm pw-btn" id="bPw">${icon('key')}${T("تغيير كلمة المرور")}</button>
+        ${installBtn('btn sm pw-btn')}
         <div class="foot-btns">
           <button class="icon-btn" id="bLook" title="${T("المظهر")}">${icon('palette')}</button>
           ${langBtn('icon-btn')}
@@ -312,6 +343,7 @@ function renderShell() {
         <span class="chip">${fmtDate(wd())}</span>
         <button class="icon-btn bell" id="bBell" title="${T("التنبيهات")}">${icon('bell')}<span class="bdg" id="bellN" hidden></span></button>
         ${themeBtn()}
+        ${simple && !isStandalone() ? `<button class="icon-btn" data-install title="${T("تثبيت على الجوال")}">${icon('download')}</button>` : ''}
         ${simple ? `<button class="icon-btn" id="bLook2" title="${T("المظهر")}">${icon('palette')}</button>${langBtn('icon-btn')}<button class="icon-btn" id="bPw2" title="${T("تغيير كلمة المرور")}">${icon('key')}</button><button class="icon-btn danger" id="bOut2" title="${T("خروج")}">${icon('logout')}</button>` : ''}
       </header>
       <main id="view"></main>
@@ -748,15 +780,16 @@ async function vCashier(el) {
     <section class="card"><div class="card-head"><h3>${icon('receipt')}${day ? T("مشتريات هذا اليوم") : T("مشتريات اليوم")}</h3><span class="badge muted">${txs.length}</span><b>${M(out)}</b></div>
       ${txs.length ? txs.map(t => `<div class="c-item"><div class="ci-ic">${icon(t.items && t.items.length ? 'package' : 'receipt')}</div><div style="flex:1;min-width:0"><b>${M(t.amount)}</b>
         <div class="small muted">${esc(t.supplier || t.description || T("بدون اسم"))}${t.invoice_no ? (" · " + T("فاتورة") + " ") + esc(t.invoice_no) : ''} · ${timeOf(t.created_at)}${payTag(t)}</div>${itemsHTML(t.items)}</div>
-        ${t.created_by === S.me.user.id ? `<button class="icon-btn danger" data-del="${t.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</div>`).join('') : ("<p class=\"muted center\">" + T("لم تُسجّل مشتريات اليوم بعد") + "</p>")}
+        ${t.created_by === S.me.user.id || can('tx_edit') ? `<span style="white-space:nowrap"><button class="icon-btn" data-ed="${t.id}" title="${T("تعديل")}">${icon('edit')}</button><button class="icon-btn danger" data-del="${t.id}" title="${T("حذف")}">${icon('trash')}</button></span>` : ''}</div>`).join('') : ("<p class=\"muted center\">" + T("لم تُسجّل مشتريات اليوم بعد") + "</p>")}
     </section>` : `
     <section class="card"><form id="fCl" autocomplete="off">
-      <h3>${icon('trendUp')}${T("مبيعات اليوم")}</h3>
+      <h3>${icon('trendUp')}${T("مبيعات اليوم")}${!counting ? ` <span class="opt">${T("(كما في تقرير نظام الكاشير)")}</span>` : ''}</h3>
       <label class="big"><span class="lbl-ic">${icon('cash')}${T("كاش")}</span><input name="cash_sales" type="number" step="0.01" min="0" inputmode="decimal" required value="${val('cash_sales')}"></label>
       <label class="big"><span class="lbl-ic">${icon('card')}${T("شبكة")}</span><input name="card_sales" type="number" step="0.01" min="0" inputmode="decimal" required value="${val('card_sales')}"></label>
       <div class="sec-title">${icon('truck')}<span class="grow">${T("تطبيقات التوصيل")}</span>${can('settings_manage') ? `<a class="btn sm ghost" href="#/settings/apps">${icon('sliders')}${T("إضافة / تعديل / إخفاء")}</a>` : ''}</div>
       ${apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0" value="${appVal(a.id)}"></label>`).join('') || ("<p class=\"muted small\">" + T("لا توجد تطبيقات ظاهرة") + "</p>")}
       <label><span>${T("عدد الطلبات")} <span class="opt">${T("(اختياري)")}</span></span><input name="orders_count" type="number" min="0" step="1" inputmode="numeric" value="${done && d.shift.orders_count ? d.shift.orders_count : ''}"></label>
+      ${!counting ? `<div class="fgrid">${actualFields(done ? d.shift : null)}</div><p class="muted small" style="margin:-4px 0 10px">${T("عُدّ الدرج الآن كما هو مع العهدة الثابتة، واكتب إجمالي جهاز الشبكة — النظام يقارن الإجمالي ويبيّن مكان أي فرق")}.</p>` : ''}
       ${day && counting ? `<label><span>${T("النقد المستلم فعلياً")} <span class="opt">${T("(اختياري)")}</span></span><input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" value="${done && d.shift.counted_at ? d.shift.counted_cash : ''}"></label>` : counts ? `<label class="big">${T("النقد الموجود في الدرج")}<input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" required></label>` : ''}
       <label><span>${T("ملاحظات")} <span class="opt">${T("(اختياري)")}</span></span><input name="notes" value="${esc(done ? d.shift.notes || '' : '')}"></label>
       <div class="io" id="io"></div>
@@ -770,6 +803,7 @@ async function vCashier(el) {
   const bt = $('#cToday'); if (bt) bt.onclick = () => { vCashier.day = null; reload(tab); };
   $$('[name=bm]', el).forEach(r => r.onchange = () => { lsSet('buyMode', r.value); reload('buy'); });
   $$('[data-del]', el).forEach(b => b.onclick = () => deleteTx(txs.find(t => t.id == b.dataset.del), () => reload('buy')));
+  $$('[data-ed]', el).forEach(b => b.onclick = () => openTxModal({ tx: txs.find(t => t.id == b.dataset.ed), onSaved: async () => { await loadMeta(); reload('buy'); } }));
 
   const fb = $('#fBuy');
   if (fb) bindBuyForm(fb, mode, async () => { await loadMeta(); reload('buy'); }, day);
@@ -793,7 +827,8 @@ async function vCashier(el) {
         <div class="r"><span>${txs.length} ${txs.length === 1 ? T("فاتورة") : T("فواتير")} ${T("من الدرج")}</span>${M(out)}</div></div>
       <div class="io-sec net"><div class="r t"><span>${T("الصافي")} = ${T("الداخل − الخارج")}</span><b class="${x.total - out < 0 ? 'neg-t' : ''}">${M(r2(x.total - out))}</b></div>
         ${showCash ? `<div class="r"><span class="lbl-ic">${icon('cash')}${T("الكاش بعد المشتريات (المطلوب تسليمه)")}</span><b class="${x.cash - out < 0 ? 'neg-t' : ''}">${M(r2(x.cash - out))}</b></div>` : ''}
-        ${showCash && !counting ? `<div class="r"><span>+ ${T("العهدة الثابتة")}</span>${M(float)}</div><div class="r t"><span class="lbl-ic">${icon('wallet')}${T("إجمالي النقد في الدرج")}</span><b>${M(r2(float + x.cash - out))}</b></div>` : ''}</div>`;
+        ${showCash && !counting ? `<div class="r"><span>+ ${T("العهدة الثابتة")}</span>${M(float)}</div><div class="r t"><span class="lbl-ic">${icon('wallet')}${T("إجمالي النقد في الدرج")}</span><b>${M(r2(float + x.cash - out))}</b></div>` : ''}</div>
+      ${showCash ? reconLive(fc, { cash: x.cash, card: x.card, apps: x.appsT, float, out }) : ''}`;
   };
   fc.addEventListener('input', draw); draw();
   fc.onsubmit = async (e) => {
@@ -807,6 +842,7 @@ async function vCashier(el) {
       ${showCash ? `<div class="r t"><span>${T("الكاش بعد المشتريات")}</span>${M(r2(x.cash - out))}</div>` : ''}
       ${showCash && !counting ? `<div class="r"><span>${T("إجمالي النقد في الدرج (مع العهدة)")}</span>${M(r2(float + x.cash - out))}</div>` : ''}
       ${counts ? `<div class="r"><span>${T("النقد في الدرج")}</span>${M(fc.counted_cash.value)}</div>` : ''}</div>
+      ${showCash ? reconLive(fc, { cash: x.cash, card: x.card, apps: x.appsT, float, out }) : ''}
       <p class="muted small">${day ? T("يوم العمل") + ' ' + fmtDate(day) : T("تأكد من الأرقام — لا يمكنك تعديلها بعد الإقفال") + '.'}</p>`, done ? T("نعم، احفظ") : T("نعم، أقفل اليوم"));
     if (!ok) return;
     busy($('button.primary', fc), async () => {
@@ -1015,9 +1051,42 @@ VIEWS.expenses = async (el) => {
 };
 
 /* ═════════════════════════ shifts history ═════════════════════════ */
+
+/* ───── closing vs the cashier system: the TOTAL decides; per method only shows where a gap probably is ───── */
+// sys / act: { cash, card, apps } — sales by payment type as the cashier system says / as actually found
+function reconHTML(sys, act) {
+  const z = (v) => Math.abs(v) < 0.005;
+  const d = { cash: r2(act.cash - sys.cash), card: r2(act.card - sys.card) };
+  const tot = r2(d.cash + d.card);
+  const cell = (v) => z(v) ? `<span class="pos-t">✓</span>` : `<span class="num ${v < 0 ? 'neg-t' : ''}">${v > 0 ? '+' : ''}${money(v)}</span>`;
+  const row = (l, a, b, v, cls = '') => `<tr class="${cls}"><td>${l}</td><td class="n">${money(a)}</td><td class="n">${money(b)}</td><td class="n">${cell(v)}</td></tr>`;
+  let verdict;
+  if (z(tot)) verdict = z(d.cash) ? `<div class="alert ok">${icon('check')}<span><b>${T("ممتاز — المبالغ مطابقة للنظام")}</b></span></div>`
+    : `<div class="alert ok">${icon('check')}<span><b>${T("الإجمالي مطابق — لا يوجد عجز")}</b><br><span class="small">${d.cash > 0 ? T("الكاش زائد والشبكة ناقصة بنفس المبلغ: غالباً طلب دُفع كاش وسُجّل شبكة في النظام") : T("الكاش ناقص والشبكة زائدة بنفس المبلغ: غالباً طلب دُفع شبكة وسُجّل كاش في النظام")} (${money(Math.abs(d.cash))})</span></span></div>`;
+  else {
+    const short = tot < 0;
+    const where = [[T("الكاش"), d.cash], [T("الشبكة"), d.card]].filter(([, v]) => short ? v < -0.004 : v > 0.004).map(([n, v]) => `${n} (${money(Math.abs(v))})`).join(T(" و "));
+    verdict = `<div class="alert ${short ? 'err' : 'warn'}">${icon('alert')}<span><b>${short ? T("عجز") : T("زيادة")} ${money(Math.abs(tot))}</b><br><span class="small">${short ? T("العجز المحتمل في:") : T("الزيادة في:")} ${where}</span></span></div>`;
+  }
+  return `<div class="recon"><div class="tbl-wrap"><table><thead><tr><th></th><th>${T("حسب النظام")}</th><th>${T("الموجود فعلاً")}</th><th>${T("الفرق")}</th></tr></thead><tbody>
+    ${row(T("كاش"), sys.cash, act.cash, d.cash)}${row(T("شبكة"), sys.card, act.card, d.card)}${sys.apps ? row(T("تطبيقات التوصيل"), sys.apps, sys.apps, 0) : ''}
+    ${row(`<b>${T("الإجمالي")}</b>`, r2(sys.cash + sys.card + sys.apps), r2(act.cash + act.card + sys.apps), tot, 't')}</tbody></table></div>
+    <p class="muted small" style="margin:4px 0 8px">${T("الكاش الفعلي = النقد الموجود في الدرج − العهدة + ما دُفع كاش من الدرج")}</p>${verdict}</div>`;
+}
+// a closed day's comparison, from its stored figures (null when nothing was entered)
+const reconOf = (s) => s.status !== 'closed' || s.act_cash == null || s.expected_cash === undefined ? null
+  : { sys: { cash: s.cash_sales, card: s.card_sales, apps: s.app_sales }, act: { cash: r2(s.act_cash - s.expected_cash + s.cash_sales), card: s.act_card || 0 } };
+const reconTotal = (r) => r2(r.act.cash + r.act.card - r.sys.cash - r.sys.card);
+// the two "found" inputs, used by every closing form when drawer counting is off
+const actualFields = (s) => `<div class="sec-title full">${icon('scale')}<span class="grow">${T("الموجود فعلاً — للمطابقة")} <span class="opt">${T("(اختياري)")}</span></span></div>
+  <label><span>${T("النقد الموجود في الدرج (مع العهدة)")}</span><input name="act_cash" type="number" step="0.01" inputmode="decimal" value="${s && s.act_cash != null ? s.act_cash : ''}"></label>
+  <label><span>${T("إجمالي جهاز الشبكة")}</span><input name="act_card" type="number" step="0.01" min="0" inputmode="decimal" value="${s && s.act_card != null ? s.act_card : ''}"></label>`;
+// live comparison from a form (empty until something is typed in the "found" fields)
+const reconLive = (f, { cash, card, apps, float, out }) => f.act_cash && (f.act_cash.value !== '' || f.act_card.value !== '')
+  ? reconHTML({ cash, card, apps }, { cash: r2(r2(f.act_cash.value) - float + out), card: r2(f.act_card.value) }) : '';
 const countBadge = (s) => s.status === 'open' ? ("<span class=\"badge info\">" + T("لم يُقفل بعد") + "</span>")
   : s.counted_at ? diffBadge(s.difference) // an old count keeps its result
-  : !S.meta.business.cash_count ? (s.expected_cash !== undefined ? `<span class="badge muted" title="${T("العهدة + الكاش − ما دُفع كاش من الدرج")}">${money(s.expected_cash)}</span>` : '—')
+  : !S.meta.business.cash_count ? (s.expected_cash !== undefined ? `<span class="badge muted" title="${T("العهدة + الكاش − ما دُفع كاش من الدرج")}">${money(s.expected_cash)}</span>${reconOf(s) ? ' ' + diffBadge(reconTotal(reconOf(s))) : ''}` : '—')
   : ("<span class=\"badge warn\">" + T("بانتظار استلام النقد") + "</span>");
 const shiftTotal = (s) => r2(s.cash_sales + s.card_sales + s.app_sales);
 
@@ -1031,12 +1100,16 @@ VIEWS.shifts = async (el) => {
     const rows = await bapi('/shifts?' + new URLSearchParams(st));
     const pending = S.meta.business.cash_count ? rows.filter(s => s.status === 'closed' && !s.counted_at).length : 0;
     $('#shList').innerHTML = (pending ? `<div class="alert warn">${pending} ${T("إقفال بانتظار استلام النقد — اضغط عليه ثم «استلام النقد»")}.</div>` : '') +
-      (rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("اليوم")}</th><th>${T("أقفله")}</th><th>${T("نقدي")}</th><th>${T("بطاقة")}</th><th>${T("تطبيقات")}</th><th>${T("الإجمالي")}</th><th>${S.meta.business.cash_count ? T("النقد") : T("إجمالي النقد")}</th></tr></thead><tbody>
+      (rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("اليوم")}</th><th>${T("أقفله")}</th><th>${T("نقدي")}</th><th>${T("بطاقة")}</th><th>${T("تطبيقات")}</th><th>${T("الإجمالي")}</th><th>${S.meta.business.cash_count ? T("النقد") : T("إجمالي النقد")}</th>${can('shift_reopen') ? '<th></th>' : ''}</tr></thead><tbody>
       ${rows.map(s => `<tr class="click" data-id="${s.id}"><td style="white-space:nowrap">${fmtDate(s.date)}</td>
         <td class="small">${s.status === 'open' ? `<span class="muted">${esc(s.opened_by_name || '')}</span>` : `${esc(s.closed_by_name || '')}<br><span class="muted">${timeOf(s.closed_at)}</span>`}</td>
         <td class="n">${money(s.cash_sales)}</td><td class="n">${money(s.card_sales)}</td><td class="n">${money(s.app_sales)}</td><td class="n"><b>${money(shiftTotal(s))}</b></td>
-        <td>${countBadge(s)}</td></tr>`).join('')}</tbody></table></div>` : ("<div class=\"empty\">" + T("لا توجد شفتات") + "</div>"));
-    $$('tr[data-id]', el).forEach(r => r.onclick = () => shiftDetail(r.dataset.id, load));
+        <td>${countBadge(s)}</td>${can('shift_reopen') ? `<td class="row-acts"><button class="icon-btn" data-sed="${s.id}" title="${s.status === 'open' ? T("إقفال هذا اليوم") : T("تعديل")}">${icon(s.status === 'open' ? 'lock' : 'edit')}</button><button class="icon-btn danger" data-sdel="${s.id}" title="${T("حذف")}">${icon('trash')}</button></td>` : ''}</tr>`).join('')}</tbody></table></div>` : ("<div class=\"empty\">" + T("لا توجد شفتات") + "</div>"));
+    $$('tr[data-id]', el).forEach(r => r.onclick = (e) => {
+      const ed = e.target.closest('[data-sed]'), dl = e.target.closest('[data-sdel]');
+      if (!ed && !dl) return shiftDetail(r.dataset.id, load);
+      bapi('/shifts/' + r.dataset.id).then(s => ed ? (s.status === 'open' ? closeOpenShift(s, load) : editShift(s, load)) : deleteShift(s, load)).catch(fail);
+    });
   };
   $('#fF').onchange = () => load().catch(fail);
   await load();
@@ -1062,6 +1135,7 @@ async function shiftDetail(id, after) {
       ${s.expected_cash !== undefined ? `<div class="r t"><span>${S.meta.business.cash_count ? T("النقد المتوقع") : T("إجمالي النقد")}</span><b>${M(s.expected_cash)}</b></div>` : ''}
       ${s.counted_at ? `<div class="r"><span>${T("النقد المستلم / المعدود")}</span>${M(s.counted_cash)}</div><div class="r"><span>${T("عند الموظفين")}</span>${M(s.cash_with_staff)}</div>` : ''}
       ${S.meta.business.cash_count || s.counted_at ? `<div class="r t"><span>${T("النتيجة")}</span>${countBadge(s)}</div>` : ''}</div></div></div>
+      ${reconOf(s) ? `<h4>${T("المطابقة مع النظام")}</h4>${reconHTML(reconOf(s).sys, reconOf(s).act)}` : ''}
       ${s.notes ? `<p><b>${T("ملاحظات:")}</b> ${esc(s.notes)}</p>` : ''}` : ''}
     <h4>${T("الفواتير والحركات")} (${s.transactions.length})</h4>
     ${s.transactions.length ? `<div class="tbl-wrap"><table><tbody>${s.transactions.map(t => `<tr><td>${esc(S.me.txTypes[t.type])}</td><td>${txDesc(txCat(t))}<div class="small muted">${esc(t.created_by_name)} ${timeOf(t.created_at)}</div></td>
@@ -1101,15 +1175,19 @@ function closeOpenShift(s, after) {
       <label>${T("بطاقة / شبكة")}<input name="card_sales" type="number" step="0.01" min="0" inputmode="decimal" required></label>
       ${apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"></label>`).join('')}
       <label>${T("عدد الطلبات")} <input name="orders_count" type="number" min="0" step="1" inputmode="numeric"></label>
-      ${counting ? `<label>${T("النقد المستلم فعلياً")} <span class="opt">${T("(اختياري)")}</span><input name="counted_cash" type="number" step="0.01" inputmode="decimal"></label>` : ''}
+      ${counting ? `<label>${T("النقد المستلم فعلياً")} <span class="opt">${T("(اختياري)")}</span><input name="counted_cash" type="number" step="0.01" inputmode="decimal"></label>` : actualFields()}
       <label class="full">${T("ملاحظات")}<input name="notes"></label>
     </div>
     <div class="summary-box"><div class="r"><span>${T("العهدة")}</span>${M(s.opening_float)}</div><div class="r"><span>− ${T("مدفوع كاش من الدرج")}</span>${M(s.drawer_out)}</div>
       <div class="r t"><span>${T("إجمالي النقد")}</span><b id="coCash"></b></div></div>
+    <div id="coRecon"></div>
     <p class="hint">${icon('info')}<span>${T("يُقفل هذا اليوم بتاريخه، ويُسجّل الإقفال باسمك في «سجل التعديلات»")}.</span></p>
     <div class="mf"><button class="btn primary">${icon('lock')}${T("إقفال هذا اليوم")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`, { wide: true });
   const f = $('form', m.el);
-  const draw = () => { $('#coCash', m.el).innerHTML = M(r2(s.opening_float + r2(f.cash_sales.value) - s.drawer_out)); };
+  const draw = () => {
+    $('#coCash', m.el).innerHTML = M(r2(s.opening_float + r2(f.cash_sales.value) - s.drawer_out));
+    $('#coRecon', m.el).innerHTML = reconLive(f, { cash: r2(f.cash_sales.value), card: r2(f.card_sales.value), apps: r2($$('[data-app]', f).reduce((t, i) => t + r2(i.value), 0)), float: s.opening_float, out: s.drawer_out });
+  };
   f.oninput = draw; draw();
   f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
     const body = { ...formObj(f), apps: $$('[data-app]', f).map(i => ({ app_id: Number(i.dataset.app), amount: r2(i.value) })) };
@@ -1163,6 +1241,7 @@ function editShift(s, after) {
       ${s.counted_at && !S.meta.business.cash_count ? `<label class="check full"><input type="checkbox" name="clear_count" value="1"> ${T("حذف نتيجة العدّ القديمة لهذا اليوم (العجز / الزيادة)")} — ${diffBadge(s.difference)}</label>` : ''}
       ${s.counted_at && S.meta.business.cash_count ? `<label>${T("النقد المستلم / المعدود")}<input name="counted_cash" type="number" step="0.01" value="${s.counted_cash}"></label>
       <label>${T("نقد عند الموظفين")}<input name="cash_with_staff" type="number" step="0.01" value="${s.cash_with_staff}"></label>` : ''}
+      ${!S.meta.business.cash_count ? actualFields(s) : ''}
       <label class="full">${T("ملاحظات")}<input name="notes" value="${esc(s.notes || '')}"></label>
     </div>
     <p class="hint">${T("سيُسجّل التعديل باسمك مع القيم قبل وبعد، ويُعاد حساب الرصيد ونتيجة الجرد تلقائياً")}.</p>
@@ -1180,13 +1259,14 @@ function editShift(s, after) {
 /* ═════════════════════════ edits log ═════════════════════════ */
 const F_L = {
   member: T("العضو"), month: T("الشهر"), monthly: T("الاشتراك الشهري"), from_month: T("من شهر"), parent: T("الأب / الأم"), category: T("الفئة"), contributing: T("مساهم"),
-  join_month: T("شهر الانضمام"), left_month: T("شهر الخروج"), guardian_access: T("متابعة الأب"), notes: T("ملاحظات"), installment: T("القسط"), start_month: T("بداية الأقساط"),
+  join_month: T("شهر الانضمام"), left_month: T("شهر الخروج"), guardian_access: T("متابعة الأب"), guardian_act: T("التصرف باسمه (طلب قرض)"), notes: T("ملاحظات"), installment: T("القسط"), start_month: T("بداية الأقساط"),
   anonymous: T("مجهول"), amount: T("المبلغ"), due_day: T("يوم الاستحقاق"), loan_multiplier: T("مضاعف حد القرض"), apply_from: T("يُطبّق من"), members: T("عدد الأعضاء"),
   issued_date: T("تاريخ الصرف"), over_limit: T("تجاوز الحد"), username: T("اسم الدخول"),
   type: T("النوع"), payment_method: T("طريقة الدفع"), amount: T("المبلغ"), fee: T("العمولة"), date: T("التاريخ"), category: T("التصنيف"), supplier: T("المورد"),
   invoice_no: T("رقم الفاتورة"), creditor: T("الدائن"), app: T("التطبيق"), description: T("الملاحظة"), cash_sales: T("الكاش"), card_sales: T("الشبكة"),
   orders_count: T("عدد الطلبات"), counted_cash: T("النقد المستلم"), cash_with_staff: T("نقد عند الموظفين"), difference: T("نتيجة الجرد"), notes: T("الملاحظات"),
   logo: T("الشعار"), card_fee_pct: T("رسوم البطاقة %"), cash_float: T("العهدة"), opening_balance: T("الرصيد الافتتاحي"), cashier_counts: T("الكاشير يعدّ الدرج"), day_start_hour: T("بداية يوم العمل (ساعة)"), open_time: T("وقت الافتتاح"), close_time: T("وقت الإغلاق"),
+  act_cash: T("النقد الموجود في الدرج"), act_card: T("إجمالي جهاز الشبكة"), spouse: T("الزوج"), mother: T("الأم"), texts: T("النصوص المعدّلة"), theme: T("الألوان"), size: T("حجم رأس الصفحة"), image: T("الصورة"), hidden: T("الأقسام المخفية"),
   debt: T("الدين المتبقي"), movements: T("الحركات المحذوفة معه"), name: T("الاسم"), kind: T("النوع"), opening_receivable: T("الآجل الافتتاحي"), active: T("فعّال"),
 };
 const AUDIT_ACTIONS = {
@@ -1194,7 +1274,7 @@ const AUDIT_ACTIONS = {
   fund_member_delete: [T("حذف عضو"), 'neg'], fund_rate: [T("تغيير الاشتراك الشهري"), 'warn'], fund_settings: [T("تعديل إعدادات الصندوق"), 'warn'],
   fund_category_create: [T("إضافة فئة اشتراك"), 'pos'], fund_category_update: [T("تعديل فئة اشتراك"), 'warn'], fund_loan_create: [T("تسجيل قرض"), 'info'],
   fund_loan_update: [T("تعديل قرض"), 'warn'], fund_loan_delete: [T("حذف قرض"), 'neg'], fund_account_create: [T("إنشاء حساب دخول لعضو"), 'pos'], fund_account_password: [T("تغيير كلمة مرور عضو"), 'warn'], fund_account_link: [T("ربط عضو بحساب موجود"), 'pos'], fund_account_unlink: [T("فك ربط حساب عضو"), 'warn'], fund_import: [T("استيراد بيانات"), 'info'],
-  fund_request_create: [T("طلب قرض جديد"), 'info'], fund_request_cancel: [T("إلغاء طلب قرض"), 'muted'], fund_request_reject: [T("رفض طلب قرض"), 'neg'], fund_request_approve: [T("موافقة على طلب قرض"), 'pos'], fund_banner: [T("تعديل البانرات"), 'muted'], fund_banner_delete: [T("حذف بانر"), 'neg'], fund_report_request: [T("طلب عرض التقرير بالأسماء"), 'info'], fund_report_approve: [T("موافقة على عرض الأسماء"), 'warn'], fund_report_reject: [T("رفض عرض الأسماء"), 'muted'], fund_report_revoke: [T("إيقاف عرض الأسماء"), 'muted'], fund_goal_create: [T("هدف جديد"), 'pos'], fund_goal_update: [T("تعديل هدف"), 'warn'], fund_goal_delete: [T("حذف هدف"), 'neg'], fund_gift: [T("مساهمة في هدف"), 'pos'], fund_gift_delete: [T("حذف مساهمة"), 'neg'], fund_statements_send: [T("إرسال الكشوفات الشهرية"), 'info'],
+  fund_request_create: [T("طلب قرض جديد"), 'info'], fund_request_cancel: [T("إلغاء طلب قرض"), 'muted'], fund_request_reject: [T("رفض طلب قرض"), 'neg'], fund_request_approve: [T("موافقة على طلب قرض"), 'pos'], fund_banner: [T("تعديل البانرات"), 'muted'], fund_impact_page: [T("تعديل صفحة أثر الصندوق"), 'warn'], fund_banner_delete: [T("حذف بانر"), 'neg'], fund_report_request: [T("طلب عرض التقرير بالأسماء"), 'info'], fund_report_approve: [T("موافقة على عرض الأسماء"), 'warn'], fund_report_reject: [T("رفض عرض الأسماء"), 'muted'], fund_report_revoke: [T("إيقاف عرض الأسماء"), 'muted'], fund_goal_create: [T("هدف جديد"), 'pos'], fund_goal_update: [T("تعديل هدف"), 'warn'], fund_goal_delete: [T("حذف هدف"), 'neg'], fund_gift: [T("مساهمة في هدف"), 'pos'], fund_gift_delete: [T("حذف مساهمة"), 'neg'], fund_statements_send: [T("إرسال الكشوفات الشهرية"), 'info'],
   tx_create: [T("إضافة فاتورة/حركة"), 'pos'], tx_update: [T("تعديل حركة"), 'warn'], tx_delete: [T("حذف حركة"), 'neg'],
   shift_open: [T("بدء يوم عمل (تلقائي)"), 'muted'], shift_close: [T("إقفال يوم"), 'pos'], shift_edit: [T("تعديل أرقام إقفال"), 'warn'], shift_reopen: [T("إلغاء إقفال"), 'neg'],
   cash_receive: [T("استلام النقد"), 'info'], settings_update: [T("تعديل الإعدادات"), 'warn'], logo_update: [T("تغيير الشعار"), 'warn'],
@@ -1344,7 +1424,8 @@ async function dailyReport(box) {
       ${rl(T("إجمالي النقد في الدرج"), s.expected_cash, { note: T("العهدة + الكاش − ما دُفع كاش من الدرج"), cls: 'total' })}
       ${rl(T("صافي النقد (بلا العهدة)"), r2(s.expected_cash - s.opening_float), { cls: 'hl' })}` : rl(T("النقد المتوقع"), s.expected_cash, { note: T("العهدة + الكاش − فواتير الدرج") })}
       ${s.counted_at ? `${rl(T("الدرج المعدود فعلاً"), s.counted_cash)}${s.cash_with_staff ? rl(T("نقد عند الموظفين"), s.cash_with_staff) : ''}
-      ${rl(T("إجمالي النقد باليد (بلا العهدة)"), r2(s.counted_cash + s.cash_with_staff - s.opening_float), { cls: 'total' })}` : ''}`}</div>`).join('')
+      ${rl(T("إجمالي النقد باليد (بلا العهدة)"), r2(s.counted_cash + s.cash_with_staff - s.opening_float), { cls: 'total' })}` : ''}
+      ${reconOf(s) ? reconHTML(reconOf(s).sys, reconOf(s).act) : ''}`}</div>`).join('')
     : `<p class="muted">${T("لا توجد شفتات لهذا اليوم")}</p>`;
   $('#sheet', box).innerHTML = `<div class="report">
     ${repHead(T("التقرير اليومي"), esc(T(d.business)), `<span class="rh-chip">${icon('calendar')}${fmtDate(d.date)}</span>${status}`)}
@@ -1599,23 +1680,6 @@ function listItemModal(key, item, after, preset = {}) {
   };
 }
 // shrink the chosen image in the browser so the stored logo stays small
-function resizeImage(file, max = 320) {
-  return new Promise((resolve, reject) => {
-    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) return reject(new Error((T("اختر صورة بصيغة") + " PNG " + T("أو") + " JPG")));
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      const k = Math.min(1, max / Math.max(img.width, img.height));
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(img.width * k)); c.height = Math.max(1, Math.round(img.height * k));
-      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-      URL.revokeObjectURL(url);
-      resolve(file.type === 'image/jpeg' ? c.toDataURL('image/jpeg', 0.9) : c.toDataURL('image/png'));
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error(T("تعذّر قراءة الصورة"))); };
-    img.src = url;
-  });
-}
 // reload business list (name / logo changed) and redraw the header
 async function refreshBusinesses() {
   S.me = await api('/me');
@@ -1624,16 +1688,65 @@ async function refreshBusinesses() {
   if (sel) sel.innerHTML = opt(S.me.businesses, S.bid);
   refreshHeaderLogo();
 }
+// move / zoom a picture inside a round frame before saving it (logo); resolves with a data URL, or null if cancelled
+function imageEditor(src, { title = T("تعديل الصورة"), out = 400 } = {}) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onerror = () => reject(new Error(T("تعذّر قراءة الصورة")));
+    img.onload = () => {
+      const md = modal(title, `<div class="ied">
+        <div class="ied-stage"><img src="${esc(src)}" alt="" draggable="false"><div class="ied-ring"></div></div>
+        <p class="small muted center" style="margin:6px 0 10px">${T("اسحب الصورة لتحريكها داخل الدائرة")}</p>
+        <label>${T("التكبير")}<input type="range" data-z min="20" max="400" step="1"></label>
+        <div class="row" style="margin-top:8px;justify-content:center"><button type="button" class="btn sm" data-fit="contain">${T("الصورة كاملة")}</button><button type="button" class="btn sm" data-fit="cover">${T("ملء الدائرة")}</button>
+          <label class="check"><input type="checkbox" data-bg checked> ${T("خلفية بيضاء")}</label></div>
+        <div class="mf"><button type="button" class="btn primary" data-ok>${icon('check')}${T("حفظ")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></div>`);
+      const stage = $('.ied-stage', md.el), pic = $('img', stage), z = $('[data-z]', md.el), bg = $('[data-bg]', md.el);
+      const W = () => stage.clientWidth;
+      const cover = () => Math.max(1 / img.width, 1 / img.height), contain = () => Math.min(1 / img.width, 1 / img.height);
+      // scale relative to the frame width; offset of the picture centre from the frame centre (fraction of the width)
+      let s = cover(), ox = 0, oy = 0, done = false;
+      const draw = () => { const w = W(), dw = img.width * s * w, dh = img.height * s * w;
+        Object.assign(pic.style, { width: dw + 'px', height: dh + 'px', left: (w - dw) / 2 + ox * w + 'px', top: (w - dh) / 2 + oy * w + 'px' });
+        stage.style.background = bg.checked ? '#fff' : ''; z.value = Math.round(s / cover() * 100); };
+      const fit = (k) => { s = k === 'contain' ? contain() : cover(); ox = oy = 0; draw(); };
+      $$('[data-fit]', md.el).forEach(b => b.onclick = () => fit(b.dataset.fit));
+      z.oninput = () => { s = cover() * Number(z.value) / 100; draw(); }; bg.onchange = draw;
+      let d = null;
+      stage.addEventListener('pointerdown', (e) => { d = { x: e.clientX, y: e.clientY, ox, oy }; stage.setPointerCapture(e.pointerId); e.preventDefault(); });
+      stage.addEventListener('pointermove', (e) => { if (!d) return; ox = d.ox + (e.clientX - d.x) / W(); oy = d.oy + (e.clientY - d.y) / W(); draw(); });
+      stage.addEventListener('pointerup', () => { d = null; }); stage.addEventListener('pointercancel', () => { d = null; });
+      stage.addEventListener('wheel', (e) => { e.preventDefault(); s *= e.deltaY < 0 ? 1.06 : 1 / 1.06; draw(); }, { passive: false });
+      requestAnimationFrame(draw);
+      $('[data-ok]', md.el).onclick = () => {
+        const c = document.createElement('canvas'); c.width = c.height = out;
+        const g = c.getContext('2d');
+        if (bg.checked) { g.fillStyle = '#fff'; g.fillRect(0, 0, out, out); }
+        const dw = img.width * s * out, dh = img.height * s * out;
+        g.drawImage(img, (out - dw) / 2 + ox * out, (out - dh) / 2 + oy * out, dw, dh);
+        let data = bg.checked ? c.toDataURL('image/jpeg', 0.9) : c.toDataURL('image/png');
+        if (data.length > 650 * 1024) data = c.toDataURL('image/jpeg', 0.8);
+        done = true; md.close(); resolve(data);
+      };
+      const watch = setInterval(() => { if (!document.body.contains(md.el)) { clearInterval(watch); if (!done) resolve(null); } }, 300);
+    };
+    img.src = src;
+  });
+}
+const fileURL = (f) => new Promise((res, rej) => { if (!/^image\/(png|jpeg|webp)$/.test(f.type)) return rej(new Error(T("اختر صورة بصيغة") + ' PNG ' + T("أو") + ' JPG')); const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error(T("تعذّر قراءة الصورة"))); r.readAsDataURL(f); });
 function bindLogoBox(box, after) {
-  const file = $('[data-logo-file]', box), del = $('[data-logo-del]', box);
+  const file = $('[data-logo-file]', box), del = $('[data-logo-del]', box), edit = $('[data-logo-edit]', box);
+  const save = async (src) => {
+    const data = await imageEditor(src, { title: T("تعديل الشعار / صورة العرض") });
+    if (!data) return;
+    await bapi('/logo', { method: 'PUT', body: { data } });
+    toast((T("تم حفظ الشعار") + " ✓"), 'ok'); await refreshBusinesses(); after();
+  };
   file.onchange = async () => {
     const f = file.files[0]; if (!f) return;
-    try {
-      const data = await resizeImage(f);
-      await bapi('/logo', { method: 'PUT', body: { data } });
-      toast((T("تم حفظ الشعار") + " ✓"), 'ok'); await refreshBusinesses(); after();
-    } catch (e) { fail(e); } finally { file.value = ''; }
+    try { await save(await fileURL(f)); } catch (e) { fail(e); } finally { file.value = ''; }
   };
+  if (edit) edit.onclick = () => save(edit.dataset.logoEdit).catch(fail);
   if (del) del.onclick = async () => {
     if (!await confirmBox(T("حذف الشعار"), ("<p>" + T("حذف شعار النشاط؟") + "</p>"), T("حذف"), true)) return;
     try { await bapi('/logo', { method: 'DELETE' }); toast(T("تم حذف الشعار"), 'ok'); await refreshBusinesses(); after(); } catch (e) { fail(e); }
@@ -1657,7 +1770,7 @@ VIEWS.settings = async (el) => {
     <div class="logo-prev">${logoURL(b) ? `<img src="${logoURL(b)}" alt="${T("الشعار")}">` : ("<span class=\"muted small\">" + T("لا يوجد شعار") + "</span>")}</div>
     <div><p class="muted small" style="margin:0 0 10px">${T("يظهر الشعار في أعلى الشاشة، وفي صفحة الكاشير، وفي التقارير المطبوعة. صورة")} PNG ${T("أو")} JPG — ${T("يُصغَّر تلقائياً")}.</p>
       <div class="row"><label class="btn primary sm">${icon('image')}${logoURL(b) ? T("تغيير الشعار") : T("رفع شعار")}<input type="file" accept="image/png,image/jpeg,image/webp" hidden data-logo-file></label>
-      ${logoURL(b) ? ("<button type=\"button\" class=\"btn sm danger\" data-logo-del>" + T("حذف الشعار") + "</button>") : ''}</div></div>
+      ${logoURL(b) ? `<button type="button" class="btn sm" data-logo-edit="${logoURL(b)}">${icon('edit')}${T("تعديل الصورة")}</button><button type="button" class="btn sm danger" data-logo-del>${T("حذف الشعار")}</button>` : ''}</div></div>
   </div></section>
   <section class="card"><h3>${T("الإعدادات العامة")}</h3><form id="fSet" class="fgrid">
     <label class="full">${T("اسم النشاط")}<input name="name" required maxlength="100" value="${esc(T(b.name))}"></label>
