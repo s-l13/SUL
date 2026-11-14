@@ -1,11 +1,15 @@
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
+// dates and the work day follow Saudi time, even if the host did not set TZ
+// (not on Windows: there the C runtime does not understand zone names and SQLite would fall back to UTC; Windows uses its own clock zone)
+if (!process.env.TZ && process.platform !== 'win32') process.env.TZ = 'Asia/Riyadh';
 const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const db = require('./db');
+const mountFund = require('./fund');
 const { seedBusinessDefaults, exportAll, dataDir } = db;
 
 // ── configuration (environment variables; all optional) ──
@@ -54,17 +58,36 @@ const nowLocal = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.g
 const isTime = (s) => typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
 const mins = (s) => +s.slice(0, 2) * 60 + +s.slice(3, 5);
 // where one work day ends and the next begins (minutes after midnight):
-// with opening & closing times → the middle of the closed hours, so a late closing still belongs to its day
-// and a purchase made in the morning before opening belongs to the coming day
+// with opening & closing times → the closing time itself: Friday's work day ends Saturday 5 am and Saturday begins right then
+// (a day still open at that moment can be closed a little late: see currentShift)
 function dayCutoff(b) {
-  if (isTime(b.open_time) && isTime(b.close_time)) {
-    const o = mins(b.open_time), c = mins(b.close_time), gap = (o - c + 1440) % 1440;
-    return (c + Math.floor(gap / 2)) % 1440;
-  }
+  if (isTime(b.open_time) && isTime(b.close_time)) return mins(b.close_time);
   return (b.day_start_hour || 0) * 60;
 }
 const workDate = (b) => { const d = new Date(Date.now() - dayCutoff(b) * 60e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
 const MAX_DATE = '9999-12-31';
+// the current work day: the clock says which day it is (workDate), but once that day has been closed,
+// the next one has already begun — so a closing at 5 am belongs to the evening before, and whatever comes after it to the new day
+async function dayNow(b) {
+  // a day closed once stays finished even when a manager reopens it to fix something (closed_at is kept)
+  const d = workDate(b);
+  const last = (await db.get('SELECT MAX(date) d FROM shifts WHERE business_id = ? AND closed_at IS NOT NULL AND date BETWEEN ? AND ?', b.id, d, addDays(d, 1)))?.d;
+  return last ? addDays(last, 1) : d;
+}
+// a short grace after the closing time (up to 3 hours, never past opening): a late closing still belongs to the day before
+function inClosedHours(b) {
+  if (!isTime(b.open_time) || !isTime(b.close_time)) return false;
+  const d = new Date(), n = d.getHours() * 60 + d.getMinutes(), c = mins(b.close_time), o = mins(b.open_time);
+  return (n - c + 1440) % 1440 < Math.min(180, (o - c + 1440) % 1440);
+}
+// the day a cashier is closing right now: the day before, if its closing is late and nothing was recorded for it
+async function lateDay(req) {
+  if (!inClosedHours(req.biz) || await currentShift(req)) return null;
+  const prev = addDays(await dayNow(req.biz), -1);
+  return await db.get('SELECT 1 x FROM shifts WHERE business_id = ? AND date = ?', req.biz.id, prev) ? null : prev;
+}
+// a cashier (no past days, no editing of closed days) only ever works on the current day
+const dayOnly = (req) => !req.can('past_days') && !req.can('shift_reopen') && !req.can('tx_edit');
 
 class HttpError extends Error { constructor(status, msg, vars) { super(msg); this.status = status; this.vars = vars; } }
 const bad = (msg, vars) => { throw new HttpError(400, msg, vars); };
@@ -100,6 +123,7 @@ const PERMISSIONS = {
   audit_view: 'عرض سجل التعديلات',
   settings_manage: 'إعدادات النشاط (التطبيقات، التصنيفات، الدائنين)',
   past_days: 'إدخال وتعديل أيام سابقة (مبيعات ومشتريات بتاريخ قديم)',
+  ...mountFund.FUND_PERMS, // family fund
 };
 const ALL_PERMS = Object.keys(PERMISSIONS);
 
@@ -123,7 +147,7 @@ function balanceEffect(t) {
 // effect on the cash drawer (for shift reconciliation)
 function drawerEffect(t) {
   if (t.payment_method !== 'drawer') return 0;
-  if (['purchase', 'expense', 'debt_payment', 'withdrawal'].includes(t.type)) return -t.amount;
+  if (['purchase', 'expense', 'debt_payment', 'withdrawal'].includes(t.type)) return -(t.amount - (t.card_part || 0)); // the part paid by card (شبكة) never left the drawer
   if (['loan', 'owner_deposit'].includes(t.type)) return t.amount;
   return 0;
 }
@@ -162,6 +186,46 @@ app.post('/api/login', wrap(async (req, res) => {
   return { ok: true };
 }));
 
+// ── in-app notifications ──
+// title is Arabic text with {placeholders}; the browser translates it and fills in vars
+async function notifyUsers(userIds, bid, kind, title, vars, link) {
+  for (const uid of [...new Set(userIds.filter(Boolean))])
+    await db.insert('INSERT INTO notifications (user_id, business_id, kind, title, vars, link) VALUES (?,?,?,?,?,?)', uid, bid || null, kind, title, JSON.stringify(vars || {}), link || null);
+  await db.run("DELETE FROM notifications WHERE read_at IS NOT NULL AND read_at < ?", nowLocal().slice(0, 10).replace(/^(\d{4})/, (y) => String(Number(y) - 1))); // read ones older than a year
+}
+// owners + whoever has one of these permissions on the business
+async function usersWith(bid, perms) {
+  const admins = (await db.all('SELECT id FROM users WHERE is_admin = 1 AND active = 1')).map(u => u.id);
+  if (!bid) return admins;
+  const rows = await db.all('SELECT ub.user_id, ub.permissions FROM user_business ub JOIN users u ON u.id = ub.user_id WHERE ub.business_id = ? AND u.active = 1', bid);
+  return [...admins, ...rows.filter(r => JSON.parse(r.permissions).some(p => perms.includes(p))).map(r => r.user_id)];
+}
+
+// "forgot my password": the owner (and the fund supervisors of a plain member) get a notification and set a new one.
+// The answer is always the same, so nobody can find out which usernames exist.
+const forgotIp = new Map(), forgotUser = new Map();
+app.post('/api/forgot', wrap(async (req) => {
+  const username = String(req.body?.username || '').trim().slice(0, 60);
+  const ip = req.ip;
+  if (tooMany(forgotIp, ip, 5, 60 * 60e3)) throw new HttpError(429, 'محاولات كثيرة، حاول لاحقاً');
+  fail(forgotIp, ip, 60 * 60e3);
+  const u = username && await db.get('SELECT id, name, username, is_admin, active FROM users WHERE lower(username) = lower(?)', username);
+  if (u && u.active && !tooMany(forgotUser, u.username.toLowerCase(), 2, 60 * 60e3)) {
+    fail(forgotUser, u.username.toLowerCase(), 60 * 60e3);
+    let to = await usersWith(null, []);
+    // a plain fund member: the fund supervisors can reset it too
+    const access = await db.all("SELECT ub.business_id, ub.permissions, b.kind FROM user_business ub JOIN businesses b ON b.id = ub.business_id WHERE ub.user_id = ?", u.id);
+    for (const a of access) if (a.kind === 'fund' && !u.is_admin && access.length === 1) to = to.concat(await usersWith(a.business_id, ['fund_manage']));
+    to = [...new Set(to)].filter(id => id !== u.id); // each person once
+    for (const uid of to) {
+      const asAdmin = (await db.get('SELECT is_admin FROM users WHERE id = ?', uid)).is_admin;
+      await notifyUsers([uid], asAdmin ? null : access[0]?.business_id, 'pw_reset', 'طلب استعادة كلمة المرور: {name} ({username})', { name: u.name, username: u.username }, asAdmin ? '#/admin/users' : '#/members');
+    }
+    await audit(null, u.id, 'password_reset_request', { username: u.username, ip });
+  }
+  return { ok: true };
+}));
+
 app.post('/api/logout', wrap(async (req, res) => {
   if (req.cookies.sid) await db.run('DELETE FROM sessions WHERE token = ?', String(req.cookies.sid));
   res.clearCookie('sid');
@@ -180,8 +244,8 @@ async function auth(req, res, next) {
 const adminOnly = (req, res, next) => req.user.is_admin ? next() : jerr(req, res, 403, 'هذه الصفحة للمدير فقط');
 
 async function userBusinesses(u) {
-  if (u.is_admin) return (await db.all('SELECT id, name, active, logo_updated logo_v FROM businesses WHERE active = 1 ORDER BY id')).map(b => ({ ...b, permissions: ALL_PERMS }));
-  return (await db.all(`SELECT b.id, b.name, b.active, b.logo_updated logo_v, ub.permissions FROM user_business ub JOIN businesses b ON b.id = ub.business_id
+  if (u.is_admin) return (await db.all('SELECT id, name, kind, active, logo_updated logo_v FROM businesses WHERE active = 1 ORDER BY id')).map(b => ({ ...b, permissions: ALL_PERMS }));
+  return (await db.all(`SELECT b.id, b.name, b.kind, b.active, b.logo_updated logo_v, ub.permissions FROM user_business ub JOIN businesses b ON b.id = ub.business_id
                         WHERE ub.user_id = ? AND b.active = 1 ORDER BY b.id`, u.id)).map(b => ({ ...b, permissions: JSON.parse(b.permissions) }));
 }
 
@@ -191,6 +255,19 @@ app.get('/api/me', wrap(async (req) => ({
   user: req.user, businesses: await userBusinesses(req.user), today: today(),
   permissions: trMap(langOf(req), PERMISSIONS), txTypes: trMap(langOf(req), TX_TYPES), methods: trMap(langOf(req), METHODS),
 })));
+
+app.get('/api/notifications', wrap(async (req) => {
+  const items = await db.all(`SELECT n.id, n.business_id, n.kind, n.title, n.vars, n.link, n.read_at, n.created_at, b.name business_name FROM notifications n
+    LEFT JOIN businesses b ON b.id = n.business_id WHERE n.user_id = ? ORDER BY n.id DESC LIMIT 40`, req.user.id);
+  const unread = (await db.get('SELECT COUNT(*) n FROM notifications WHERE user_id = ? AND read_at IS NULL', req.user.id)).n;
+  return { unread, items: items.map(n => ({ ...n, vars: n.vars ? JSON.parse(n.vars) : {} })) };
+}));
+app.post('/api/notifications/read', wrap(async (req) => {
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(idOf).filter(Boolean).slice(0, 200);
+  if (req.body?.all) await db.run('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL', nowLocal(), req.user.id);
+  else for (const id of ids) await db.run('UPDATE notifications SET read_at = ? WHERE id = ? AND user_id = ? AND read_at IS NULL', nowLocal(), id, req.user.id);
+  return { ok: true };
+}));
 
 app.post('/api/me/password', wrap(async (req) => {
   const { current, password } = req.body || {};
@@ -224,17 +301,19 @@ async function makeBackup(label) {
 const admin = express.Router();
 admin.use(adminOnly);
 
-admin.get('/businesses', wrap(() => db.all('SELECT id, name, card_fee_pct, cash_float, opening_balance, active, created_at, cashier_counts, day_start_hour, open_time, close_time, logo_updated logo_v FROM businesses ORDER BY id')));
+admin.get('/businesses', wrap(() => db.all('SELECT id, name, card_fee_pct, cash_float, opening_balance, active, created_at, cashier_counts, cash_count, day_start_hour, open_time, close_time, kind, logo_updated logo_v FROM businesses ORDER BY id')));
 admin.post('/businesses', wrap(async (req) => {
   const { name, card_fee_pct = 0, cash_float = 0, opening_balance = 0 } = req.body || {};
+  const kind = req.body?.kind === 'fund' ? 'fund' : 'restaurant';
   if (!name || !String(name).trim()) bad('اسم النشاط مطلوب');
   const id = await db.tx(async () => {
-    const bid = await db.insert('INSERT INTO businesses (name, card_fee_pct, cash_float, opening_balance) VALUES (?,?,?,?)',
-      String(name).trim(), num(card_fee_pct) || 0, num(cash_float) || 0, num(opening_balance) || 0);
-    await seedBusinessDefaults(bid);
+    const bid = await db.insert('INSERT INTO businesses (name, card_fee_pct, cash_float, opening_balance, kind) VALUES (?,?,?,?,?)',
+      String(name).trim(), kind === 'fund' ? 0 : num(card_fee_pct) || 0, kind === 'fund' ? 0 : num(cash_float) || 0, kind === 'fund' ? 0 : num(opening_balance) || 0, kind);
+    if (kind === 'fund') await mountFund.seedFund(db, bid, today().slice(0, 7));
+    else await seedBusinessDefaults(bid);
     return bid;
   });
-  await audit(id, req.user.id, 'business_create', { name });
+  await audit(id, req.user.id, 'business_create', { name, kind });
   return { id };
 }));
 admin.put('/businesses/:id', wrap(async (req) => {
@@ -263,6 +342,14 @@ admin.post('/businesses/:id/reset', wrap(async (req) => {
     await db.run('DELETE FROM transactions WHERE business_id = ?', b.id);
     await db.run('DELETE FROM shift_app_sales WHERE shift_id IN (SELECT id FROM shifts WHERE business_id = ?)', b.id);
     await db.run('DELETE FROM shifts WHERE business_id = ?', b.id);
+    if (b.kind === 'fund') { // family fund: payments and loans go, members / tree / amounts stay
+      c.fund_payments = (await db.get('SELECT COUNT(*) n FROM fund_payments WHERE business_id = ?', b.id)).n;
+      await db.run('DELETE FROM fund_payments WHERE business_id = ?', b.id);
+      await db.run('DELETE FROM fund_loan_requests WHERE business_id = ?', b.id);
+      await db.run('DELETE FROM fund_report_requests WHERE business_id = ?', b.id);
+      await db.run('DELETE FROM fund_loans WHERE business_id = ?', b.id);
+      await db.run('DELETE FROM fund_goal_gifts WHERE business_id = ?', b.id);
+    }
     if (x.zero_openings) {
       await db.run('UPDATE businesses SET opening_balance = 0 WHERE id = ?', b.id);
       await db.run('UPDATE delivery_apps SET opening_receivable = 0 WHERE business_id = ?', b.id);
@@ -290,6 +377,10 @@ async function saveAccess(userId, access) {
     const perms = (a.permissions || []).filter(p => ALL_PERMS.includes(p));
     await db.run('INSERT INTO user_business (user_id, business_id, permissions) VALUES (?,?,?)', userId, bid, JSON.stringify(perms));
   }
+  // someone linked to a fund member keeps seeing their own fund data, whatever else changes
+  for (const f of await db.all('SELECT DISTINCT business_id FROM fund_members WHERE user_id = ? AND deleted_at IS NULL', userId))
+    if (!await db.get('SELECT 1 x FROM user_business WHERE user_id = ? AND business_id = ?', userId, f.business_id))
+      await db.run('INSERT INTO user_business (user_id, business_id, permissions) VALUES (?,?,?)', userId, f.business_id, '[]');
 }
 admin.post('/users', wrap(async (req) => {
   const { username, name, password, is_admin, access } = req.body || {};
@@ -297,7 +388,7 @@ admin.post('/users', wrap(async (req) => {
   if (!password || String(password).length < PW_MIN) bad('كلمة المرور يجب أن تكون {n} أحرف على الأقل', { n: PW_MIN });
   if (await db.get('SELECT 1 x FROM users WHERE lower(username) = lower(?)', String(username).trim())) bad('اسم المستخدم مستخدم مسبقاً');
   const id = await db.tx(async () => {
-    const uid = await db.insert('INSERT INTO users (username, name, password_hash, is_admin) VALUES (?,?,?,?)',
+    const uid = await db.insert('INSERT INTO users (username, name, password_hash, is_admin, must_change) VALUES (?,?,?,?,0)',
       String(username).trim(), String(name).trim(), bcrypt.hashSync(String(password), 10), is_admin ? 1 : 0);
     await saveAccess(uid, access);
     return uid;
@@ -313,7 +404,7 @@ admin.put('/users/:id', wrap(async (req) => {
   if (password && String(password).length < PW_MIN) bad('كلمة المرور يجب أن تكون {n} أحرف على الأقل', { n: PW_MIN });
   await db.tx(async () => {
     await db.run('UPDATE users SET name=?, is_admin=?, active=? WHERE id=?', String(name || u.name).trim(), is_admin ? 1 : 0, active ? 1 : 0, u.id);
-    if (password) await db.run('UPDATE users SET password_hash=? WHERE id=?', bcrypt.hashSync(String(password), 10), u.id);
+    if (password) await db.run('UPDATE users SET password_hash=?, must_change=0 WHERE id=?', bcrypt.hashSync(String(password), 10), u.id);
     // deactivated or password reset → that user is signed out everywhere (never your own session)
     if ((!active || password) && u.id !== req.user.id) await db.run('DELETE FROM sessions WHERE user_id = ?', u.id);
     await saveAccess(u.id, access);
@@ -361,10 +452,17 @@ const need = (...ps) => (req, res, next) => ps.some(p => req.can(p)) ? next() : 
 // ---------- financial core ----------
 const openShift = (bid) => db.get("SELECT * FROM shifts WHERE business_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1", bid);
 // cashier never "opens" a shift: it is created on the first invoice or at closing
-async function ensureOpenShift(req) {
+async function currentShift(req) {
   const s = await openShift(req.biz.id);
+  if (!s || !dayOnly(req)) return s;
+  const day = await dayNow(req.biz);
+  if (s.date === addDays(day, -1) && !s.closed_at && inClosedHours(req.biz)) return s; // closing a little after closing time
+  return s.date >= day ? s : db.get("SELECT * FROM shifts WHERE business_id = ? AND status = 'open' AND date >= ? ORDER BY id DESC LIMIT 1", req.biz.id, day);
+}
+async function ensureOpenShift(req) {
+  const s = await currentShift(req);
   if (s) return s;
-  const date = workDate(req.biz);
+  const date = await dayNow(req.biz);
   let id;
   try { id = await db.insert('INSERT INTO shifts (business_id, date, opening_float, opened_by) VALUES (?,?,?,?)', req.biz.id, date, req.biz.cash_float, req.user.id); }
   catch (e) { const again = await openShift(req.biz.id); if (again) return again; throw e; } // another request opened it at the same moment
@@ -377,6 +475,7 @@ async function recomputeShift(id) {
   if (!s || s.status !== 'closed') return;
   const { drawerNet } = await shiftDrawer(s);
   const expected = r2(s.opening_float + s.cash_sales + drawerNet);
+  // a day only has a shortage / surplus when it was counted (with counting off no new count is recorded; old counts stay as they were)
   const difference = s.counted_at ? r2(s.counted_cash + s.cash_with_staff - expected) : 0;
   await db.run('UPDATE shifts SET expected_cash = ?, difference = ? WHERE id = ?', expected, difference, id);
 }
@@ -394,24 +493,26 @@ async function txSnap(t) {
   const nm = async (table, id) => id ? (await db.get(`SELECT name FROM ${table} WHERE id = ?`, id))?.name : null;
   const items = t.items || (t.id ? await loadItems(t.id) : []);
   return {
-    type: t.type, payment_method: t.payment_method, amount: t.amount, fee: t.fee || 0, date: t.date, category: await nm('categories', t.category_id),
+    type: t.type, payment_method: t.payment_method, amount: t.amount, card_part: t.card_part || 0, fee: t.fee || 0, date: t.date, category: await nm('categories', t.category_id),
     supplier: t.supplier || '', invoice_no: t.invoice_no || '', creditor: await nm('creditors', t.creditor_id), app: await nm('delivery_apps', t.app_id), description: t.description || '',
     items: items.map(i => `${i.name} ${i.qty}×${i.price}`).join('، '),
   };
 }
 async function parseSales(req, x) {
   const cash_sales = num(x.cash_sales), card_sales = num(x.card_sales || 0);
-  if (!(cash_sales >= 0) || !(card_sales >= 0)) bad('أدخل مبالغ الكاش والشبكة بشكل صحيح');
+  const neg = req.can('shift_reopen'); // a manager may record a negative cash figure; a cashier may not
+  if (!Number.isFinite(cash_sales) || (!neg && cash_sales < 0) || !(card_sales >= 0)) bad('أدخل مبالغ الكاش والشبكة بشكل صحيح');
   const apps = (Array.isArray(x.apps) ? x.apps : []).map(a => ({ app_id: idOf(a.app_id), amount: num(a.amount || 0), orders_count: Math.max(0, parseInt(a.orders_count) || 0) }));
   if (apps.some(a => !(a.amount >= 0))) bad('مبيعات التطبيقات غير صحيحة');
   const valid = new Set((await db.all('SELECT id FROM delivery_apps WHERE business_id = ?', req.biz.id)).map(a => a.id));
   if (apps.some(a => !valid.has(a.app_id))) bad('تطبيق غير معروف');
   return { cash_sales: r2(cash_sales), card_sales: r2(card_sales), apps, app_sales: r2(apps.reduce((t, a) => t + a.amount, 0)), orders_count: Math.max(0, parseInt(x.orders_count) || 0) };
 }
-function parseCount(x) {
+function parseCount(x, neg = false, biz) {
+  if (biz && !biz.cash_count) return null; // cash counting is off for this business
   if (x.counted_cash === undefined || x.counted_cash === null || x.counted_cash === '') return null;
   const c = num(x.counted_cash), st = num(x.cash_with_staff || 0);
-  if (!(c >= 0) || !(st >= 0)) bad('مبلغ النقد غير صحيح');
+  if (!Number.isFinite(c) || !Number.isFinite(st) || (!neg && (c < 0 || st < 0))) bad('مبلغ النقد غير صحيح');
   return { counted_cash: r2(c), cash_with_staff: r2(st) };
 }
 async function saveAppSales(shiftId, apps) {
@@ -479,7 +580,7 @@ async function movement(b, from, to) {
     FROM delivery_apps a LEFT JOIN shift_app_sales sa ON sa.app_id = a.id AND sa.shift_id IN
       (SELECT id FROM shifts WHERE business_id = ? AND status = 'closed' AND date BETWEEN ? AND ?)
     WHERE a.business_id = ? GROUP BY a.id, a.name ORDER BY a.id`, b.id, from, to, b.id);
-  const txs = await db.all(`SELECT type, payment_method, SUM(amount) amount, SUM(fee) fee FROM transactions
+  const txs = await db.all(`SELECT type, payment_method, SUM(amount) amount, SUM(fee) fee, SUM(card_part) card_part FROM transactions
     WHERE business_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ? GROUP BY type, payment_method`, b.id, from, to);
   const sum = (f) => r2(txs.filter(f).reduce((t, x) => t + x.amount, 0));
   const total = r2(sh.cash + sh.card + sh.apps);
@@ -499,7 +600,10 @@ async function movement(b, from, to) {
     adjustments: sum(x => x.type === 'adjustment'),
     app_collected: sum(x => x.type === 'app_settlement'),
     app_commission: r2(txs.filter(x => x.type === 'app_settlement').reduce((t, x) => t + x.fee, 0)),
+    cash_out: r2(-txs.reduce((t, x) => t + drawerEffect(x), 0)), // paid in cash from the drawer (net of money put in)
+    card_paid: r2(txs.filter(x => x.payment_method === 'drawer').reduce((t, x) => t + (x.card_part || 0), 0)),
   };
+  m.cash_net = r2(m.sales.cash - m.cash_out); // the day's cash to hand over (on top of the fixed float)
   m.net_movement = r2(total - m.card_fee + m.cash_diff + txs.reduce((t, x) => t + balanceEffect(x), 0));
   // operating result (accrual): sales - fees - commissions - all purchases & expenses (incl. on credit)
   m.operating_result = r2(total - m.card_fee - m.app_commission - m.purchases_paid - m.purchases_credit - m.expenses_paid - m.expenses_credit);
@@ -510,18 +614,19 @@ async function dailySeries(b, from, to) {
   const sh = await db.all(`SELECT date, SUM(cash_sales) cash, SUM(card_sales) card, SUM(app_sales) apps, SUM(orders_count) orders,
     SUM(card_fee) card_fee, SUM(difference) diff, COUNT(*) n FROM shifts
     WHERE business_id = ? AND status = 'closed' AND date BETWEEN ? AND ? GROUP BY date`, b.id, from, to);
-  const tx = await db.all(`SELECT date, type, payment_method, SUM(amount) amount, SUM(fee) fee FROM transactions
+  const tx = await db.all(`SELECT date, type, payment_method, SUM(amount) amount, SUM(fee) fee, SUM(card_part) card_part FROM transactions
     WHERE business_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ? GROUP BY date, type, payment_method`, b.id, from, to);
   const days = new Map();
-  const day = (d) => days.get(d) || days.set(d, { date: d, sales: 0, cash: 0, card: 0, apps: 0, orders: 0, purchases: 0, expenses: 0, diff: 0, fees: 0, shifts: 0 }).get(d);
+  const day = (d) => days.get(d) || days.set(d, { date: d, sales: 0, cash: 0, card: 0, apps: 0, orders: 0, purchases: 0, expenses: 0, diff: 0, fees: 0, shifts: 0, cash_out: 0 }).get(d);
   for (const s of sh) Object.assign(day(s.date), { cash: r2(s.cash), card: r2(s.card), apps: r2(s.apps), sales: r2(s.cash + s.card + s.apps), orders: s.orders, diff: r2(s.diff), fees: s.card_fee, shifts: s.n });
   for (const t of tx) {
     const d = day(t.date);
     if (t.type === 'purchase') d.purchases = r2(d.purchases + t.amount);
     if (t.type === 'expense') d.expenses = r2(d.expenses + t.amount);
     if (t.type === 'app_settlement') d.fees += t.fee;
+    d.cash_out = r2(d.cash_out - drawerEffect(t));
   }
-  for (const d of days.values()) { d.result = r2(d.sales - d.fees - d.purchases - d.expenses); delete d.fees; }
+  for (const d of days.values()) { d.result = r2(d.sales - d.fees - d.purchases - d.expenses); d.cash_net = r2(d.cash - d.cash_out); delete d.fees; delete d.cash_out; }
   return days;
 }
 
@@ -529,9 +634,10 @@ async function dailySeries(b, from, to) {
 biz.get('/meta', wrap(async (req) => {
   const b = req.biz;
   return {
-    business: { id: b.id, name: b.name, logo_v: b.logo_updated, theme: b.theme ? JSON.parse(b.theme) : null, card_fee_pct: b.card_fee_pct, cash_float: b.cash_float, cashier_counts: b.cashier_counts, day_start_hour: b.day_start_hour, open_time: b.open_time, close_time: b.close_time, day_cutoff: dayCutoff(b),
+    business: { id: b.id, name: b.name, kind: b.kind || 'restaurant', logo_v: b.logo_updated, theme: b.theme ? JSON.parse(b.theme) : null, card_fee_pct: b.card_fee_pct, cash_float: b.cash_float, cashier_counts: b.cashier_counts, cash_count: b.cash_count, day_start_hour: b.day_start_hour, open_time: b.open_time, close_time: b.close_time, day_cutoff: dayCutoff(b),
       opening_balance: req.can('balance_view') ? b.opening_balance : undefined },
-    work_date: workDate(b),
+    work_date: await dayNow(b),
+    day_only: dayOnly(req),
     permissions: [...req.perms],
     apps: await db.all('SELECT * FROM delivery_apps WHERE business_id = ? ORDER BY active DESC, id', b.id),
     categories: await db.all('SELECT * FROM categories WHERE business_id = ? ORDER BY kind, active DESC, id', b.id),
@@ -548,21 +654,22 @@ biz.put('/settings', need('settings_manage'), wrap(async (req) => {
     cash_float: pick('cash_float', v => num(v) || 0),
     opening_balance: req.can('balance_view') ? pick('opening_balance', v => num(v) || 0) : b.opening_balance,
     cashier_counts: pick('cashier_counts', v => (v && v !== '0' && v !== 'false') ? 1 : 0),
+    cash_count: pick('cash_count', v => (v && v !== '0' && v !== 'false') ? 1 : 0),
     day_start_hour: pick('day_start_hour', v => Math.min(12, Math.max(0, parseInt(v) || 0))),
     open_time: pick('open_time', v => { if (v === '' || v === null) return null; if (!isTime(v)) bad('وقت الافتتاح غير صحيح'); return v; }),
     close_time: pick('close_time', v => { if (v === '' || v === null) return null; if (!isTime(v)) bad('وقت الإغلاق غير صحيح'); return v; }),
   };
   if (!after.open_time !== !after.close_time) bad('أدخل وقت الافتتاح ووقت الإغلاق معاً');
   if (after.open_time && after.open_time === after.close_time) bad('وقت الافتتاح والإغلاق متساويان');
-  await db.run('UPDATE businesses SET name=?, card_fee_pct=?, cash_float=?, opening_balance=?, cashier_counts=?, day_start_hour=?, open_time=?, close_time=? WHERE id=?',
-    after.name, after.card_fee_pct, after.cash_float, after.opening_balance, after.cashier_counts, after.day_start_hour, after.open_time, after.close_time, b.id);
+  await db.run('UPDATE businesses SET name=?, card_fee_pct=?, cash_float=?, opening_balance=?, cashier_counts=?, cash_count=?, day_start_hour=?, open_time=?, close_time=? WHERE id=?',
+    after.name, after.card_fee_pct, after.cash_float, after.opening_balance, after.cashier_counts, after.cash_count, after.day_start_hour, after.open_time, after.close_time, b.id);
   const before = Object.fromEntries(Object.keys(after).map(k => [k, b[k]]));
   await audit(b.id, req.user.id, 'settings_update', { before, after });
   return { ok: true };
 }));
 // default appearance for all users of the business (each device can still override it)
 const THEME_OPTS = { mode: ['light', 'dark', 'auto'], bg: ['neutral', 'tint', 'white', 'warm'], side: ['light', 'brand', 'dark'], radius: ['sm', 'md', 'lg'], size: ['md', 'lg'], density: ['comfy', 'compact'], font: ['plex', 'tajawal', 'cairo', 'almarai', 'kufi'] };
-biz.put('/theme', need('settings_manage'), wrap(async (req) => {
+biz.put('/theme', need('settings_manage', 'fund_manage'), wrap(async (req) => {
   const x = req.body || {}, t = {};
   for (const [k, vals] of Object.entries(THEME_OPTS)) if (vals.includes(x[k])) t[k] = x[k];
   if (/^#[0-9a-f]{6}$/i.test(x.accent || '')) t.accent = x.accent.toLowerCase();
@@ -580,7 +687,7 @@ biz.get('/logo', wrap((req, res) => {
   res.set('Cache-Control', 'private, max-age=31536000'); // URL carries ?v=<logo_updated>
   res.send(Buffer.from(m[2], 'base64'));
 }));
-biz.put('/logo', need('settings_manage'), wrap(async (req) => {
+biz.put('/logo', need('settings_manage', 'fund_manage'), wrap(async (req) => {
   const data = String(req.body?.data || '');
   if (!LOGO_RE.test(data)) bad('صيغة الصورة غير مدعومة — استخدم PNG أو JPG');
   if (data.length > 700 * 1024) bad('حجم الشعار كبير جداً');
@@ -588,7 +695,7 @@ biz.put('/logo', need('settings_manage'), wrap(async (req) => {
   await audit(req.biz.id, req.user.id, 'logo_update', { before: { logo: req.biz.logo ? 'شعار سابق' : 'بدون شعار' }, after: { logo: 'شعار جديد' } });
   return { ok: true };
 }));
-biz.delete('/logo', need('settings_manage'), wrap(async (req) => {
+biz.delete('/logo', need('settings_manage', 'fund_manage'), wrap(async (req) => {
   await db.run('UPDATE businesses SET logo = NULL, logo_updated = NULL WHERE id = ?', req.biz.id);
   await audit(req.biz.id, req.user.id, 'logo_update', { before: { logo: 'شعار سابق' }, after: { logo: 'بدون شعار' } });
   return { ok: true };
@@ -664,7 +771,7 @@ biz.delete('/creditors/:id', need('finance_manage', 'settings_manage'), wrap(asy
 
 // ---------- summary (dashboard) ----------
 biz.get('/summary', need('balance_view'), wrap(async (req) => {
-  const b = req.biz, t = workDate(b);
+  const b = req.biz, t = await dayNow(b);
   const balance = await balanceAsOf(b, MAX_DATE);
   const receivables = await receivablesAsOf(b.id, MAX_DATE);
   const debts = await debtsAsOf(b.id, MAX_DATE);
@@ -675,7 +782,8 @@ biz.get('/summary', need('balance_view'), wrap(async (req) => {
     today: await movement(b, t, t), month: await movement(b, t.slice(0, 8) + '01', t),
     openShift: os ? { ...os, opened_by_name: (await db.get('SELECT name FROM users WHERE id = ?', os.opened_by))?.name } : null,
     // days entered later from the "past days" page are not waiting for a cashier hand-over
-    pending_cash: (await db.all("SELECT date, opened_at FROM shifts WHERE business_id = ? AND status = 'closed' AND counted_at IS NULL", b.id))
+    stale_open: (await db.all("SELECT id, date FROM shifts WHERE business_id = ? AND status = 'open' AND date < ? ORDER BY date", b.id, t)),
+    pending_cash: !b.cash_count ? 0 : (await db.all("SELECT date, opened_at FROM shifts WHERE business_id = ? AND status = 'closed' AND counted_at IS NULL", b.id))
       .filter(s => String(s.opened_at).slice(0, 10) <= addDays(s.date, 1)).length,
     last7: Array.from({ length: 7 }, (_, i) => { const d = addDays(t, i - 6), x = series.get(d); return { date: d, sales: x ? x.sales : 0, out: x ? r2(x.purchases + x.expenses) : 0 }; }),
   };
@@ -707,10 +815,10 @@ async function getShift(req) {
 const showExpected = (req) => req.can('shift_view_expected') || req.can('reports_view');
 
 // ── past days: an authorised user records the purchases and sales of an earlier work day ──
-function pastDay(req, d) {
+async function pastDay(req, d) {
   if (!req.can('past_days')) throw new HttpError(403, 'ليس لديك صلاحية لإدخال أيام سابقة');
   if (!isDate(d)) bad('التاريخ غير صحيح');
-  if (d >= workDate(req.biz)) bad('اختر يوماً قبل يوم العمل الحالي');
+  if (d >= await dayNow(req.biz)) bad('اختر يوماً قبل يوم العمل الحالي');
   return d;
 }
 const dayShift = (req, d) => db.get('SELECT * FROM shifts WHERE business_id = ? AND date = ? ORDER BY id DESC LIMIT 1', req.biz.id, d);
@@ -723,15 +831,15 @@ async function ensureDayShift(req, d) {
   return db.get('SELECT * FROM shifts WHERE id = ?', id);
 }
 biz.get('/shifts/day', wrap(async (req) => {
-  const d = pastDay(req, req.query.date);
+  const d = await pastDay(req, req.query.date);
   const s = await dayShift(req, d);
   return { shift: s ? await shiftView(req, s) : null, cash_float: req.biz.cash_float, work_date: d, past: true };
 }));
 biz.post('/shifts/close-day', wrap(async (req) => {
   const x = req.body || {};
-  const d = pastDay(req, x.date);
+  const d = await pastDay(req, x.date);
   const sales = await parseSales(req, x);
-  const count = parseCount(x);
+  const count = parseCount(x, req.can('shift_reopen'), req.biz);
   const existing = await dayShift(req, d);
   if (existing && existing.status === 'open') return closeShift(req, existing); // a day the cashier forgot to close
   const before = existing && existing.closed_at ? await shiftSnap(existing.id) : null;
@@ -752,16 +860,18 @@ biz.post('/shifts/close-day', wrap(async (req) => {
 }));
 
 biz.get('/shifts/current', wrap(async (req) => {
-  const s = await openShift(req.biz.id);
+  const s = await currentShift(req);
   const last = await db.get(`SELECT s.id, s.date, s.closed_at, s.cash_sales, s.card_sales, s.app_sales, u.name closed_by_name FROM shifts s
     LEFT JOIN users u ON u.id = s.closed_by WHERE s.business_id = ? AND s.status = 'closed' ORDER BY s.closed_at DESC, s.id DESC LIMIT 1`, req.biz.id);
-  return { shift: s ? await shiftView(req, s) : null, cash_float: req.biz.cash_float, work_date: workDate(req.biz), last_closed: last || null };
+  return { shift: s ? await shiftView(req, s) : null, cash_float: req.biz.cash_float, work_date: (await lateDay(req)) || await dayNow(req.biz), last_closed: last || null };
 }));
 
 biz.post('/shifts/open', need('shift_manage'), wrap(async (req) => {
   if (await openShift(req.biz.id)) bad('يوجد شفت مفتوح بالفعل، أقفله أولاً');
-  const { date = workDate(req.biz), opening_float } = req.body || {};
+  const { date = await dayNow(req.biz), opening_float } = req.body || {};
   if (!isDate(date)) bad('التاريخ غير صحيح');
+  if (dayOnly(req) && date !== await dayNow(req.biz)) throw new HttpError(403, 'يمكنك العمل على يوم العمل الحالي فقط');
+  if (await db.get('SELECT 1 x FROM shifts WHERE business_id = ? AND date = ?', req.biz.id, date)) bad('يوجد إقفال لهذا اليوم بالفعل — افتحه من «سجل الإقفالات»');
   const f = opening_float === undefined || opening_float === '' ? req.biz.cash_float : num(opening_float);
   if (!(f >= 0)) bad('العهدة غير صحيحة');
   const id = await db.insert('INSERT INTO shifts (business_id, date, opening_float, opened_by) VALUES (?,?,?,?)', req.biz.id, date, f, req.user.id);
@@ -772,8 +882,8 @@ biz.post('/shifts/open', need('shift_manage'), wrap(async (req) => {
 async function closeShift(req, s) {
   const x = req.body || {};
   const sales = await parseSales(req, x);
-  const count = parseCount(x);
-  if (!count && req.biz.cashier_counts) bad('أدخل النقد المعدود في الدرج');
+  const count = parseCount(x, req.can('shift_reopen'), req.biz);
+  if (!count && req.biz.cash_count && req.biz.cashier_counts) bad('أدخل النقد المعدود في الدرج');
   await db.tx(async () => {
     await db.run(`UPDATE shifts SET status='closed', closed_by=?, closed_at=?, cash_sales=?, card_sales=?, app_sales=?, orders_count=?, card_fee=?,
       counted_cash=?, cash_with_staff=?, counted_by=?, counted_at=?, notes=? WHERE id=?`,
@@ -789,14 +899,21 @@ async function closeShift(req, s) {
   if (showExpected(req)) Object.assign(res, { expected: after.expected_cash, actual: count ? r2(count.counted_cash + count.cash_with_staff) : null, difference: count ? after.difference : null });
   return res;
 }
-biz.post('/shifts/:id/close', need('shift_manage'), wrap(async (req) => {
+biz.post('/shifts/:id/close', need('shift_manage', 'shift_reopen'), wrap(async (req) => {
   const s = await getShift(req);
   if (s.status !== 'open') bad('الشفت مقفل بالفعل');
+  if (dayOnly(req) && s.date < await dayNow(req.biz)) throw new HttpError(403, 'هذا يوم سابق — يُقفله المدير من «أيام سابقة»');
   return closeShift(req, s);
 }));
 // simple cashier flow: close "today" without caring about shift ids
 biz.post('/shifts/close-current', need('shift_manage'), wrap(async (req) => {
   await parseSales(req, req.body || {}); // validate before creating anything
+  const late = await lateDay(req); // closing a little after closing time, on a day with no invoices
+  if (late) {
+    const id = await db.insert('INSERT INTO shifts (business_id, date, opening_float, opened_by) VALUES (?,?,?,?)', req.biz.id, late, req.biz.cash_float, req.user.id);
+    await audit(req.biz.id, req.user.id, 'shift_open', { id, date: late, auto: true, late: true });
+    return closeShift(req, await db.get('SELECT * FROM shifts WHERE id = ?', id));
+  }
   return closeShift(req, await ensureOpenShift(req));
 }));
 
@@ -804,7 +921,8 @@ biz.post('/shifts/close-current', need('shift_manage'), wrap(async (req) => {
 biz.post('/shifts/:id/receive', need('shift_reopen'), wrap(async (req) => {
   const s = await getShift(req);
   if (s.status !== 'closed') bad('هذا اليوم لم يُقفل بعد');
-  const count = parseCount(req.body || {});
+  if (!req.biz.cash_count) bad('مطابقة النقد بالعدّ غير مفعّلة لهذا النشاط — فعّلها من الإعدادات');
+  const count = parseCount(req.body || {}, req.can('shift_reopen'), req.biz);
   if (!count) bad('أدخل مبلغ النقد المستلم');
   const before = await shiftSnap(s.id);
   await db.tx(async () => {
@@ -823,7 +941,7 @@ biz.put('/shifts/:id', need('shift_reopen'), wrap(async (req) => {
   if (s.status !== 'closed') bad('هذا اليوم لم يُقفل بعد');
   const x = req.body || {};
   const sales = await parseSales(req, x);
-  const count = parseCount(x);
+  const count = parseCount(x, req.can('shift_reopen'), req.biz);
   const date = isDate(x.date) ? x.date : s.date;
   const before = await shiftSnap(s.id);
   await db.tx(async () => {
@@ -831,12 +949,36 @@ biz.put('/shifts/:id', need('shift_reopen'), wrap(async (req) => {
       date, sales.cash_sales, sales.card_sales, sales.app_sales, sales.orders_count, r2(sales.card_sales * req.biz.card_fee_pct / 100), String(x.notes ?? s.notes ?? '').slice(0, 1000), s.id);
     if (count) await db.run('UPDATE shifts SET counted_cash=?, cash_with_staff=?, counted_by=COALESCE(counted_by, ?), counted_at=COALESCE(counted_at, ?) WHERE id=?',
       count.counted_cash, count.cash_with_staff, req.user.id, nowLocal(), s.id);
+    // the manager drops an old (wrong) drawer count of this day → its shortage / surplus disappears, logged before/after
+    if (x.clear_count && !count) await db.run('UPDATE shifts SET counted_cash=0, cash_with_staff=0, counted_by=NULL, counted_at=NULL WHERE id=?', s.id);
     if (date !== s.date) await db.run("UPDATE transactions SET date = ? WHERE shift_id = ? AND payment_method = 'drawer'", date, s.id);
     await saveAppSales(s.id, sales.apps);
     await recomputeShift(s.id);
   });
   await audit(req.biz.id, req.user.id, 'shift_edit', { id: s.id, date, before, after: await shiftSnap(s.id) });
   return { ok: true };
+}));
+
+biz.delete('/shifts/:id', need('shift_reopen'), wrap(async (req) => {
+  const s = await getShift(req);
+  const x = req.body || {};
+  const before = await shiftSnap(s.id);
+  const txs = await db.all('SELECT id, amount, payment_method FROM transactions WHERE shift_id = ? AND deleted_at IS NULL', s.id);
+  let target = null;
+  if (x.move_to) {
+    target = await db.get('SELECT * FROM shifts WHERE id = ? AND business_id = ?', idOf(x.move_to), req.biz.id);
+    if (!target || target.id === s.id) bad('اختر يوماً آخر لنقل الفواتير إليه');
+  }
+  await db.tx(async () => {
+    if (target) await db.run("UPDATE transactions SET shift_id = ?, date = CASE WHEN payment_method = 'drawer' THEN ? ELSE date END WHERE shift_id = ? AND deleted_at IS NULL", target.id, target.date, s.id);
+    else await db.run('UPDATE transactions SET deleted_at = ?, deleted_by = ? WHERE shift_id = ? AND deleted_at IS NULL', nowLocal(), req.user.id, s.id);
+    await db.run('UPDATE transactions SET shift_id = NULL WHERE shift_id = ?', s.id); // deleted ones keep no link to the removed day
+    await db.run('DELETE FROM shift_app_sales WHERE shift_id = ?', s.id);
+    await db.run('DELETE FROM shifts WHERE id = ?', s.id);
+    if (target) await recomputeShift(target.id);
+  });
+  await audit(req.biz.id, req.user.id, 'shift_delete', { id: s.id, date: s.date, before, invoices: txs.length, moved_to: target ? target.date : undefined, invoices_total: r2(txs.reduce((t, x) => t + x.amount, 0)) });
+  return { ok: true, invoices: txs.length, moved_to: target ? target.date : null };
 }));
 
 biz.post('/shifts/:id/reopen', need('shift_reopen'), wrap(async (req) => {
@@ -894,6 +1036,9 @@ async function validateTx(req, x, existing) {
   else if (!(amount > 0)) bad('المبلغ يجب أن يكون أكبر من صفر');
   const fee = type === 'app_settlement' ? num(x.fee || 0) : 0;
   if (!(fee >= 0)) bad('العمولة غير صحيحة');
+  // a purchase paid partly (or fully) by card / شبكة: only the cash part comes out of the drawer
+  const card_part = method === 'drawer' && ['purchase', 'expense'].includes(type) ? r2(num(x.card_part || 0)) : 0;
+  if (!(card_part >= 0) || card_part > r2(amount) + 0.001) bad('المبلغ المدفوع شبكة يجب أن يكون بين صفر وقيمة الفاتورة');
 
   let category_id = null, creditor_id = null, app_id = null;
   if (['purchase', 'expense'].includes(type) && x.category_id) {
@@ -924,19 +1069,20 @@ async function validateTx(req, x, existing) {
     if (existing && existing.shift_id && existing.payment_method === 'drawer') {
       const s = await db.get('SELECT * FROM shifts WHERE id = ?', existing.shift_id);
       if (s.status !== 'open' && !can('tx_edit')) bad('تم إقفال اليوم — لا يمكن تعديل الحركة');
+      if (dayOnly(req) && s.date < await dayNow(req.biz)) bad('هذا يوم سابق — لا يمكن تعديله');
       shift_id = s.id; date = s.date;
     } else if (x.day) {
-      const s = await ensureDayShift(req, pastDay(req, x.day)); // an invoice of an earlier work day
+      const s = await ensureDayShift(req, await pastDay(req, x.day)); // an invoice of an earlier work day
       shift_id = s.id; date = s.date;
     } else {
       const s = await ensureOpenShift(req); // all validation above passed — safe to auto-open
       shift_id = s.id; date = s.date;
     }
   } else {
-    date = isDate(x.date) ? x.date : workDate(req.biz);
+    date = isDate(x.date) ? x.date : await dayNow(req.biz);
   }
   return {
-    type, payment_method: method, amount: r2(amount), fee: r2(fee), category_id, creditor_id, app_id, shift_id, date,
+    type, payment_method: method, amount: r2(amount), card_part, fee: r2(fee), category_id, creditor_id, app_id, shift_id, date,
     supplier: String(x.supplier || '').trim().slice(0, 200) || null,
     invoice_no: String(x.invoice_no || '').trim().slice(0, 100) || null,
     description: String(x.description || '').trim().slice(0, 1000) || null,
@@ -957,8 +1103,8 @@ async function attachItems(rows) {
   return rows;
 }
 async function insertTx(req, t) {
-  const id = await db.insert(`INSERT INTO transactions (business_id, shift_id, date, type, payment_method, amount, fee, category_id, creditor_id, app_id, supplier, invoice_no, description, created_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, req.biz.id, t.shift_id, t.date, t.type, t.payment_method, t.amount, t.fee, t.category_id, t.creditor_id, t.app_id, t.supplier, t.invoice_no, t.description, req.user.id);
+  const id = await db.insert(`INSERT INTO transactions (business_id, shift_id, date, type, payment_method, amount, card_part, fee, category_id, creditor_id, app_id, supplier, invoice_no, description, created_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, req.biz.id, t.shift_id, t.date, t.type, t.payment_method, t.amount, t.card_part, t.fee, t.category_id, t.creditor_id, t.app_id, t.supplier, t.invoice_no, t.description, req.user.id);
   await saveItems(id, t.items);
   await recomputeShift(t.shift_id); // an invoice added to an already-closed (past) day
   await audit(req.biz.id, req.user.id, 'tx_create', { id, after: await txSnap(t) });
@@ -994,9 +1140,9 @@ async function getTx(req) {
 async function canModify(req, t) {
   if (req.can('tx_edit')) return;
   const s = t.shift_id && await db.get('SELECT status, date FROM shifts WHERE id = ?', t.shift_id);
-  if (t.created_by === req.user.id && s && s.status === 'open') return;
+  if (t.created_by === req.user.id && s && s.status === 'open' && !(dayOnly(req) && s.date < await dayNow(req.biz))) return;
   // own entries of an earlier day, made from the "past days" page
-  if (t.created_by === req.user.id && s && req.can('past_days') && s.date < workDate(req.biz)) return;
+  if (t.created_by === req.user.id && s && req.can('past_days') && s.date < await dayNow(req.biz)) return;
   throw new HttpError(403, 'ليس لديك صلاحية لتعديل هذه الحركة');
 }
 biz.put('/transactions/:id', wrap(async (req) => {
@@ -1008,8 +1154,8 @@ biz.put('/transactions/:id', wrap(async (req) => {
   if (req.body?.items === undefined) body.items = old.items;
   const t = await validateTx(req, body, old);
   await db.tx(async () => {
-    await db.run(`UPDATE transactions SET shift_id=?, date=?, type=?, payment_method=?, amount=?, fee=?, category_id=?, creditor_id=?, app_id=?, supplier=?, invoice_no=?, description=? WHERE id=?`,
-      t.shift_id, t.date, t.type, t.payment_method, t.amount, t.fee, t.category_id, t.creditor_id, t.app_id, t.supplier, t.invoice_no, t.description, old.id);
+    await db.run(`UPDATE transactions SET shift_id=?, date=?, type=?, payment_method=?, amount=?, card_part=?, fee=?, category_id=?, creditor_id=?, app_id=?, supplier=?, invoice_no=?, description=? WHERE id=?`,
+      t.shift_id, t.date, t.type, t.payment_method, t.amount, t.card_part, t.fee, t.category_id, t.creditor_id, t.app_id, t.supplier, t.invoice_no, t.description, old.id);
     await saveItems(old.id, t.items);
     await recomputeShift(old.shift_id);
     if (t.shift_id !== old.shift_id) await recomputeShift(t.shift_id);
@@ -1029,7 +1175,7 @@ biz.delete('/transactions/:id', wrap(async (req) => {
 }));
 
 // ---------- edits log ----------
-const EDIT_ACTIONS = ['tx_update', 'tx_delete', 'shift_edit', 'shift_reopen', 'cash_receive', 'settings_update', 'apps_update', 'categories_update', 'creditors_update', 'creditors_delete', 'logo_update'];
+const EDIT_ACTIONS = [...mountFund.FUND_EDIT_ACTIONS, 'tx_update', 'tx_delete', 'shift_edit', 'shift_reopen', 'cash_receive', 'settings_update', 'apps_update', 'categories_update', 'creditors_update', 'creditors_delete', 'logo_update'];
 biz.get('/audit', need('audit_view'), wrap(async (req) => {
   const to = isDate(req.query.to) ? req.query.to : today();
   const from = isDate(req.query.from) ? req.query.from : addDays(to, -30);
@@ -1071,6 +1217,7 @@ biz.get('/reports/daily', need('reports_view'), wrap(async (req) => {
   const debts = await debtsAsOf(b.id, date);
   const shifts = await db.all(`SELECT s.*, uo.name opened_by_name, uc.name closed_by_name FROM shifts s LEFT JOIN users uo ON uo.id = s.opened_by
     LEFT JOIN users uc ON uc.id = s.closed_by WHERE s.business_id = ? AND s.date = ? ORDER BY s.id`, b.id, date);
+  for (const s of shifts) s.drawer_out = r2(-(await shiftDrawer(s)).drawerNet);
   const txs = await db.all(`SELECT t.*, c.name category_name, cr.name creditor_name, a.name app_name, u.name created_by_name FROM transactions t
     LEFT JOIN categories c ON c.id = t.category_id LEFT JOIN creditors cr ON cr.id = t.creditor_id LEFT JOIN delivery_apps a ON a.id = t.app_id
     LEFT JOIN users u ON u.id = t.created_by WHERE t.business_id = ? AND t.date = ? AND t.deleted_at IS NULL ORDER BY t.id`, b.id, date);
@@ -1110,6 +1257,7 @@ biz.get('/balances', need('balance_view'), wrap(async (req) => ({
   balance: await balanceAsOf(req.biz, MAX_DATE), receivables: await receivablesAsOf(req.biz.id, MAX_DATE), debts: await debtsAsOf(req.biz.id, MAX_DATE),
 })));
 
+mountFund(app, biz, { db, wrap, need, bad, HttpError, audit, r2, num, idOf, today, nowLocal, isDate, bcrypt, PW_MIN, DEFAULT_PASSWORD, notifyUsers, usersWith });
 app.use('/api/b/:bid', biz);
 
 // ───────────────────────── errors ─────────────────────────
@@ -1134,10 +1282,33 @@ async function dailyBackup() {
   } catch (e) { console.error('backup failed:', e.message); }
 }
 
+// ── the owner forgot the password: set ADMIN_RESET_PASSWORD (and optionally ADMIN_RESET_USERNAME) on the host, restart.
+// Only someone with access to the hosting account can do it. Each value is used once; the owner must pick a new password at login.
+async function adminRecovery() {
+  const pw = process.env.ADMIN_RESET_PASSWORD;
+  if (!pw) return;
+  if (pw.length < PW_MIN || pw === DEFAULT_PASSWORD) return console.error(`ADMIN_RESET_PASSWORD ignored: needs at least ${PW_MIN} characters`);
+  const wanted = String(process.env.ADMIN_RESET_USERNAME || '').trim();
+  const tag = crypto.createHash('sha256').update('recovery:' + wanted + ':' + pw).digest('hex').slice(0, 16);
+  if (await db.get("SELECT 1 FROM audit_log WHERE action = 'admin_recovery' AND details LIKE ?", `%${tag}%`))
+    return console.log('ADMIN_RESET_PASSWORD was already used — delete it from the environment variables');
+  const u = wanted
+    ? await db.get('SELECT id, username FROM users WHERE lower(username) = lower(?) AND is_admin = 1', wanted)
+    : await db.get('SELECT id, username FROM users WHERE is_admin = 1 ORDER BY id LIMIT 1');
+  if (!u) return console.error('ADMIN_RESET_PASSWORD: no such system owner');
+  await db.run('UPDATE users SET password_hash = ?, must_change = 1, active = 1 WHERE id = ?', bcrypt.hashSync(pw, 10), u.id);
+  await db.run('DELETE FROM sessions WHERE user_id = ?', u.id);
+  await audit(null, u.id, 'admin_recovery', { username: u.username, tag });
+  console.log(`password of "${u.username}" was reset — log in with it, choose a new one, then delete ADMIN_RESET_PASSWORD`);
+}
+
 // ───────────────────────── start ─────────────────────────
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0'; // on a VPS: HOST=127.0.0.1 so only the HTTPS proxy can reach it
-db.init().then(() => {
+db.init().then(adminRecovery).then(() => {
+  // monthly statements of the family fund: checked soon after start, then every hour
+  const stmt = () => app.locals.fundStatements().catch(e => console.error('statements failed:', e.message));
+  setTimeout(stmt, 20e3); setInterval(stmt, 3600e3);
   if (db.dialect === 'sqlite' && !process.env.DB_PATH) { setTimeout(dailyBackup, 15e3); setInterval(dailyBackup, 3600e3); } // DB_PATH is only set by tests
   app.listen(PORT, HOST, () => {
     console.log(`\n  النظام يعمل الآن (${db.dialect === 'pg' ? 'PostgreSQL' : 'SQLite'}):`);

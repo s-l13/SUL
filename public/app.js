@@ -79,6 +79,7 @@ const ICONS = {
   hand: '<path d="M11 14h2a2 2 0 1 0 0-4h-3c-.6 0-1.1.2-1.4.6L3 16"/><path d="m7 20 1.6-1.4c.3-.4.8-.6 1.4-.6h4c1.1 0 2.1-.4 2.8-1.2l4.6-4.4a2 2 0 0 0-2.75-2.91l-4.2 3.9"/><path d="m2 15 6 6"/><circle cx="16" cy="9" r="2.9"/><circle cx="6" cy="5" r="3"/>',
   fileText: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>',
   percent: '<path d="M19 5 5 19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
 };
 const FLIP = new Set(['chevL', 'chevR', 'logout', 'undo', 'trendUp']);
 const icon = (n, cls = '') => `<svg class="ic ${FLIP.has(n) ? 'flip' : ''} ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ''}</svg>`;
@@ -102,6 +103,15 @@ const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const addDays = (s, n) => { const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 const dayName = (s) => new Date(s + 'T12:00:00').toLocaleDateString(LANG === 'en' ? 'en-US' : 'ar-SA-u-ca-gregory-nu-latn', { weekday: 'long' });
 const fmtDate = (s) => s ? `${dayName(s)} ${s}` : '';
+const dayTag = (i) => {
+  let t = i.nextElementSibling;
+  if (!t || !t.classList.contains('dname')) { t = document.createElement('span'); t.className = 'dname'; i.after(t); }
+  t.textContent = /^\d{4}-\d{2}-\d{2}$/.test(i.value) ? dayName(i.value) : '';
+};
+new MutationObserver(() => document.querySelectorAll('input[type=date]').forEach(i => { if (!i.dataset.dn) { i.dataset.dn = 1; dayTag(i); } }))
+  .observe(document.documentElement, { childList: true, subtree: true });
+document.addEventListener('input', (e) => { if (e.target.type === 'date') dayTag(e.target); });
+document.addEventListener('change', (e) => { if (e.target.type === 'date') dayTag(e.target); });
 const timeOf = (s) => s ? s.slice(11, 16) : '';
 const opt = (list, sel, f = x => [x.id, T(x.name)]) => list.map(x => { const [v, l] = f(x); return `<option value="${esc(v)}" ${String(v) === String(sel ?? '') ? 'selected' : ''}>${esc(l)}</option>`; }).join('');
 const formObj = (form) => Object.fromEntries(new FormData(form).entries());
@@ -114,9 +124,17 @@ const curBiz = () => S.me && S.me.businesses.find(x => x.id === S.bid);
 const can = (p) => !!S.meta && S.meta.permissions.includes(p);
 // the business's current work day (a closing after midnight still belongs to the previous day)
 const wd = () => (S.meta && S.meta.work_date) || S.me.today;
-// role shown for a user: owner (whole system) / business manager (every permission on the business) / cashier / user
-const roleName = (isAdmin, perms) => isAdmin ? T("مالك النظام") : Object.keys(S.me.permissions).every(k => perms.includes(k)) ? T("مدير النشاط")
-  : perms.length && perms.every(k => ['purchases_add', 'shift_manage'].includes(k)) ? T("كاشير") : T("مستخدم");
+// a business is a restaurant (daily closing) or a family fund — each has its own pages and permissions
+const isFund = () => S.meta?.business?.kind === 'fund';
+const FUND_PERMS = ['fund_collect', 'fund_view_all', 'fund_manage'];
+const permsFor = (kind) => Object.keys(S.me.permissions).filter(k => kind === 'fund' ? FUND_PERMS.includes(k) || k === 'audit_view' : !FUND_PERMS.includes(k));
+// role shown for a user: owner (whole system) / business manager / cashier / fund supervisor / collector / member
+function roleName(isAdmin, perms, kind) {
+  if (isAdmin) return T("مالك النظام");
+  if (kind === 'fund') return perms.includes('fund_manage') ? T("مشرف الصندوق") : perms.includes('fund_collect') ? T("محصّل") : perms.includes('fund_view_all') ? T("مراقب") : T("عضو");
+  return permsFor('restaurant').every(k => perms.includes(k)) ? T("مدير النشاط")
+    : perms.length && perms.every(k => ['purchases_add', 'shift_manage'].includes(k)) ? T("كاشير") : T("مستخدم");
+}
 
 async function api(path, opts = {}) {
   const res = await fetch('/api' + path, {
@@ -186,11 +204,21 @@ function showLogin() {
     <label>${T("كلمة المرور")}<input name="password" type="password" autocomplete="current-password" required></label>
     <div class="err" id="lerr"></div>
     <button class="btn primary block">${T("دخول")}</button>
+    <button type="button" class="btn sm ghost block" id="bForgot" style="margin-top:10px">${T("نسيت كلمة المرور؟")}</button>
     <div class="login-tools">${langBtn('btn sm ghost')}${themeBtn()}</div></form></div>`;
   $('#fLogin').onsubmit = async (e) => {
     e.preventDefault();
     try { await api('/login', { method: 'POST', body: formObj(e.target) }); await boot(); }
     catch (err) { $('#lerr').textContent = err.message; }
+  };
+  $('#bForgot').onclick = () => {
+    const m = modal(T("نسيت كلمة المرور؟"), `<form autocomplete="off"><p class="small">${T("اكتب اسم الدخول، وسيصل تنبيه للمدير ليعيّن لك كلمة مرور جديدة ويرسلها لك")}.</p>
+      <label>${T("اسم المستخدم")}<input name="username" required dir="ltr" value="${esc($('#fLogin').username.value)}"></label>
+      <div class="mf"><button class="btn primary">${icon('check')}${T("إرسال الطلب")}</button></div></form>`);
+    $('form', m.el).onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+      await api('/forgot', { method: 'POST', body: formObj(e.target) });
+      m.close(); modal(T("تم إرسال الطلب"), `<div class="result"><div class="res-ic">${icon('check')}</div><p>${T("وصل طلبك للمدير. سيعيّن لك كلمة مرور جديدة ويرسلها لك، وبعد الدخول تستطيع تغييرها من زر المفتاح 🔑")}.</p></div><div class="mf"><button class="btn primary block" data-x>${T("تم")}</button></div>`);
+    }); };
   };
   $('#fLogin input').focus();
 }
@@ -231,44 +259,46 @@ async function loadMeta() { S.meta = await bapi('/meta'); LOOK.setBusiness(S.met
 
 // a cashier (no management permission at all) gets a single simplified page
 const MGMT_PERMS = ['tx_view_all', 'tx_edit', 'reports_view', 'balance_view', 'finance_manage', 'shift_reopen', 'settings_manage', 'audit_view'];
-const isSimple = () => !!S.me && !S.me.user.is_admin && !!S.meta && !MGMT_PERMS.some(can);
+const isSimple = () => !!S.me && !S.me.user.is_admin && !!S.meta && !isFund() && !MGMT_PERMS.some(can);
+// pages reached by a link (not in the menu): name → visible?
+const EXTRA_ROUTES = {};
 // [route, label, visible?, icon, group]
 const NAV = [
-  ['home', T("الرئيسية"), () => can('balance_view'), 'home', 'day'],
-  ['shift', T("اليوم (المشتريات والإقفال)"), () => !!S.bid, 'receipt', 'day'],
-  ['tx', T("الحركات"), () => can('tx_view_all'), 'list', 'day'],
-  ['expenses', T("المصروفات"), () => can('tx_view_all'), 'fileText', 'day'],
-  ['shifts', T("سجل الإقفالات"), () => can('reports_view') || can('shift_reopen'), 'clipboard', 'day'],
-  ['reports', T("التقارير"), () => can('reports_view'), 'chart', 'fin'],
-  ['finance', T("التحصيل والديون"), () => can('balance_view'), 'wallet', 'fin'],
+  ['home', T("الرئيسية"), () => !isFund() && can('balance_view'), 'home', 'day'],
+  ['shift', T("اليوم (المشتريات والإقفال)"), () => !!S.bid && !isFund(), 'receipt', 'day'],
+  ['tx', T("الحركات"), () => !isFund() && can('tx_view_all'), 'list', 'day'],
+  ['expenses', T("المصروفات"), () => !isFund() && can('tx_view_all'), 'fileText', 'day'],
+  ['shifts', T("سجل الإقفالات"), () => !isFund() && (can('reports_view') || can('shift_reopen')), 'clipboard', 'day'],
+  ['reports', T("التقارير"), () => !isFund() && can('reports_view'), 'chart', 'fin'],
+  ['finance', T("التحصيل والديون"), () => !isFund() && can('balance_view'), 'wallet', 'fin'],
   ['audit', T("سجل التعديلات"), () => can('audit_view'), 'history', 'fin'],
-  ['settings', T("إعدادات النشاط"), () => can('settings_manage'), 'sliders', 'adm'],
+  ['settings', T("إعدادات النشاط"), () => !isFund() && can('settings_manage'), 'sliders', 'adm'],
   ['admin', T("المستخدمون والأنشطة"), () => S.me.user.is_admin, 'users', 'adm'],
 ];
 const NAV_GROUPS = { day: T("العمل اليومي"), fin: T("التقارير والمالية"), adm: T("الإدارة") };
-const defaultRoute = () => '#/' + (can('balance_view') ? 'home' : S.bid ? 'shift' : 'admin');
+const defaultRoute = () => '#/' + (isFund() ? 'fund' : can('balance_view') ? 'home' : S.bid ? 'shift' : 'admin');
 // Arabic names: skip the article "ال" so "المدير" shows "م" (a bare alif looks like "I")
-const initials = (n) => String(n || '?').trim().split(/\s+/).map(w => w.replace(/^ال(?=..)/, '')[0]).slice(0, 2).join('');
+const initials = (n) => { const w = String(n || '?').trim().split(/\s+/).filter(x => !['بن', 'بنت', 'ابن', 'آل', 'ال'].includes(x)); return (w.length ? w : ['?']).map(x => x.replace(/^ال(?=..)/, '')[0]).slice(0, 2).join(''); };
 const bizLogoBox = (b) => `<div class="biz-logo" id="hLogo">${logoURL(b) ? `<img src="${logoURL(b)}" alt="">` : icon('store')}</div>`;
 function refreshHeaderLogo() { const el = $('#hLogo'); if (el) el.outerHTML = bizLogoBox(curBiz()); const n = $('#hBizName'); if (n) n.textContent = T(curBiz()?.name || ''); }
 
 function renderShell() {
   const bs = S.me.businesses, simple = isSimple();
-  const role = roleName(S.me.user.is_admin, S.meta ? S.meta.permissions : []);
+  const role = roleName(S.me.user.is_admin, S.meta ? S.meta.permissions : [], S.meta?.business?.kind);
   const bizSel = bs.length > 1 ? `<select id="bizSel" class="biz-sel">${opt(bs, S.bid)}</select>` : '';
   $('#app').innerHTML = `<div class="layout ${simple ? 'simple' : ''}">
     <aside class="side" id="side">
       <div class="side-head">
-        <div class="brandline">${bizLogoBox(curBiz())}<div class="bt"><b id="hBizName">${esc(T(curBiz()?.name || ''))}</b><span>${T("الإقفال اليومي")}</span></div></div>
+        <div class="brandline">${bizLogoBox(curBiz())}<div class="bt"><b id="hBizName">${esc(T(curBiz()?.name || ''))}</b><span>${isFund() ? T("صندوق العائلة") : T("الإقفال اليومي")}</span></div></div>
         ${bizSel}
       </div>
       <nav class="side-nav" id="nav"></nav>
       <div class="side-foot">
         <div class="me"><div class="avatar">${esc(initials(S.me.user.name))}</div><div><b>${esc(S.me.user.name)}</b><span>${role}</span></div></div>
+        <button class="btn sm pw-btn" id="bPw">${icon('key')}${T("تغيير كلمة المرور")}</button>
         <div class="foot-btns">
           <button class="icon-btn" id="bLook" title="${T("المظهر")}">${icon('palette')}</button>
           ${langBtn('icon-btn')}
-          <button class="icon-btn" id="bPw" title="${T("كلمة المرور")}">${icon('key')}</button>
           <button class="icon-btn danger" id="bOut" title="${T("خروج")}">${icon('logout')}</button>
         </div>
       </div>
@@ -280,8 +310,9 @@ function renderShell() {
         ${simple ? `<div class="biz-mini">${bizLogoBox(curBiz())}<b>${esc(T(curBiz()?.name || ''))}</b></div>${bizSel}` : `<div class="crumb" id="crumb"></div>`}
         <div class="spacer"></div>
         <span class="chip">${fmtDate(wd())}</span>
+        <button class="icon-btn bell" id="bBell" title="${T("التنبيهات")}">${icon('bell')}<span class="bdg" id="bellN" hidden></span></button>
         ${themeBtn()}
-        ${simple ? `<button class="icon-btn" id="bLook2" title="${T("المظهر")}">${icon('palette')}</button>${langBtn('icon-btn')}<button class="icon-btn danger" id="bOut2" title="${T("خروج")}">${icon('logout')}</button>` : ''}
+        ${simple ? `<button class="icon-btn" id="bLook2" title="${T("المظهر")}">${icon('palette')}</button>${langBtn('icon-btn')}<button class="icon-btn" id="bPw2" title="${T("تغيير كلمة المرور")}">${icon('key')}</button><button class="icon-btn danger" id="bOut2" title="${T("خروج")}">${icon('logout')}</button>` : ''}
       </header>
       <main id="view"></main>
     </div>
@@ -296,7 +327,9 @@ function renderShell() {
   const logout = async () => { await api('/logout', { method: 'POST' }).catch(() => { }); showLogin(); };
   $$('#bOut, #bOut2').forEach(b => b.onclick = logout);
   $$('#bLook, #bLook2').forEach(b => b.onclick = openAppearance);
-  $('#bPw').onclick = changePassword;
+  $$('#bPw, #bPw2').forEach(b => b.onclick = changePassword);
+  $('#bBell').onclick = (e) => { e.stopPropagation(); openBell(); };
+  refreshBell();
   const side = $('#side'), scrim = $('#scrim');
   const toggle = (open) => { side.classList.toggle('open', open); scrim.classList.toggle('open', open); };
   $('#bMenu').onclick = () => toggle(!side.classList.contains('open'));
@@ -323,9 +356,59 @@ const pageHead = (ic, title, sub = '', acts = '', cls = '') => `<div class="page
 function changePassword() {
   const m = modal(T("تغيير كلمة المرور"), `<form id="fPw">
     <label>${T("كلمة المرور الحالية")}<input type="password" name="current" required></label>
-    <label>${T("كلمة المرور الجديدة")}<input type="password" name="password" minlength="6" required></label>
+    <label>${T("كلمة المرور الجديدة")}<input type="password" name="password" minlength="6" required autocomplete="new-password"></label>
+    <label>${T("تأكيد كلمة المرور الجديدة")}<input type="password" name="password2" minlength="6" required autocomplete="new-password"></label>
+    <p class="hint">${icon('info')}<span>${T("نسيت كلمتك الحالية؟ اطلب من المدير تعيين كلمة جديدة لك")}.</span></p>
     <div class="mf"><button class="btn primary">${icon('check')}${T("حفظ")}</button></div></form>`);
-  $('#fPw', m.el).onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => { await api('/me/password', { method: 'POST', body: formObj(e.target) }); m.close(); toast(T("تم تغيير كلمة المرور"), 'ok'); }); };
+  $('#fPw', m.el).onsubmit = (e) => {
+    e.preventDefault();
+    const f = e.target;
+    if (f.password.value !== f.password2.value) return toast(T("كلمتا المرور غير متطابقتين"), 'err');
+    busy(e.submitter, async () => { await api('/me/password', { method: 'POST', body: { current: f.current.value, password: f.password.value } }); m.close(); toast(T("تم تغيير كلمة المرور"), 'ok'); });
+  };
+}
+
+/* ───── notifications (bell) ───── */
+const fillT = (title, vars = {}) => esc(T(title)).replace(/\{(\w+)\}/g, (_, k) => { const v = vars[k]; return typeof v === 'number' ? money(v) : k === 'month' && /^\d{4}-\d{2}$/.test(v || '') && typeof monLabel === 'function' ? monLabel(v) : esc(v ?? ''); });
+async function refreshBell() {
+  clearTimeout(refreshBell.t);
+  if (!S.me) return; // signed out: stop checking
+  try {
+    const d = await api('/notifications');
+    S.bell = d;
+    const n = $('#bellN');
+    if (n) { n.hidden = !d.unread; n.textContent = d.unread > 9 ? '9+' : d.unread; }
+  } catch { }
+  refreshBell.t = setTimeout(refreshBell, 60e3);
+}
+async function openBell() {
+  const old = $('.npanel'); if (old) { old.remove(); return; }
+  await refreshBell();
+  const d = S.bell || { items: [], unread: 0 };
+  const p = document.createElement('div');
+  p.className = 'npanel';
+  p.innerHTML = `<div class="np-h"><b>${T("التنبيهات")}</b>${d.unread ? `<button class="btn sm ghost" data-all>${T("تحديد الكل كمقروء")}</button>` : ''}</div>
+    <div class="np-list">${d.items.length ? d.items.map(n => `<button type="button" class="np-item ${n.read_at ? '' : 'new'}" data-n="${n.id}">
+      <span class="np-ic">${icon(n.kind === 'fund_receipt' ? 'receipt' : n.kind === 'fund_statement' ? 'fileText' : n.kind === 'fund_gift' ? 'heart' : n.kind === 'pw_reset' ? 'key' : /rejected|report_reject/.test(n.kind) ? 'x' : /approved|report_approve/.test(n.kind) ? 'check' : n.kind === 'report_requested' ? 'eye' : 'hand')}</span>
+      <span class="np-t"><span>${fillT(n.title, n.vars)}</span>${n.vars && n.vars.note ? `<small class="muted">${esc(n.vars.note)}</small>` : ''}
+        <small class="muted">${n.business_name ? esc(T(n.business_name)) + ' · ' : ''}${n.created_at.slice(0, 16)}</small></span></button>`).join('')
+      : `<div class="empty small">${T("لا توجد تنبيهات")}</div>`}</div>`;
+  document.body.append(p);
+  const close = (e) => { if (!p.contains(e.target) && !e.target.closest('#bBell')) { p.remove(); document.removeEventListener('click', close); } };
+  setTimeout(() => document.addEventListener('click', close), 0);
+  const all = $('[data-all]', p);
+  if (all) all.onclick = async () => { await api('/notifications/read', { method: 'POST', body: { all: true } }); p.remove(); refreshBell(); };
+  $$('[data-n]', p).forEach(b => b.onclick = async () => {
+    const n = d.items.find(x => x.id == b.dataset.n);
+    p.remove(); document.removeEventListener('click', close);
+    if (!n.read_at) await api('/notifications/read', { method: 'POST', body: { ids: [n.id] } }).catch(() => { });
+    // open the right business first, then the page
+    if (n.business_id && n.business_id !== S.bid && S.me.businesses.some(x => x.id === n.business_id)) {
+      S.bid = n.business_id; localStorage.setItem('bid', S.bid); await loadMeta(); renderShell();
+    }
+    if (n.link) { if (location.hash === n.link) route(); else location.hash = n.link; }
+    refreshBell();
+  });
 }
 
 // appearance window: ready-made themes + every detail; changes apply live.
@@ -406,7 +489,7 @@ const VIEWS = {};
 async function route() {
   if (!S.me) return;
   const [, name = '', ...rest] = location.hash.split('/');
-  const item = NAV.find(n => n[0] === name);
+  const item = NAV.find(n => n[0] === name) || (EXTRA_ROUTES[name] && [name, '', EXTRA_ROUTES[name]]);
   if (!item || !item[2]()) { location.hash = defaultRoute(); return; }
   renderNav();
   const el = $('#view');
@@ -479,6 +562,7 @@ function txFormHTML(opts = {}) {
       <label data-f="supplier">${T("المورد")}<input name="supplier" list="dl-sup"></label>
       <label data-f="invoice">${T("رقم الفاتورة")}<input name="invoice_no"></label>
       <label data-f="method">${T("طريقة الدفع")}<select name="payment_method"></select></label>
+      <label data-f="cardpart"><span>${T("منها مدفوع شبكة")} <span class="opt">${T("(اختياري)")}</span></span><input name="card_part" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"></label>
       <label data-f="creditor">${T("الدائن / المورد")}<select name="creditor_id"><option value="">— ${T("اختر")} —</option>${opt(S.meta.creditors.filter(c => c.active))}</select></label>
       <label data-f="date">${T("التاريخ")}<input type="date" name="date" value="${wd()}"></label>
       <label class="full">${T("ملاحظة / البيان")}<input name="description"></label>
@@ -514,6 +598,7 @@ function bindTxForm(form, { tx = null, onSaved } = {}) {
       method: !['app_settlement', 'adjustment', 'debt_writeoff'].includes(type) && methods.length > 0,
       creditor: method === 'credit' || ['loan', 'debt_payment', 'debt_writeoff'].includes(type),
       date: method !== 'drawer' || ['app_settlement', 'adjustment', 'debt_writeoff'].includes(type),
+      cardpart: method === 'drawer' && ['purchase', 'expense'].includes(type),
     };
     for (const [k, v] of Object.entries(show)) $(`[data-f="${k}"]`, form).hidden = !v;
     $('[data-amt-l]', form).textContent = type === 'app_settlement' ? T("المبلغ الواصل (الصافي)") : type === 'adjustment' ? T("مبلغ التسوية (+/−)") : T("المبلغ");
@@ -524,6 +609,7 @@ function bindTxForm(form, { tx = null, onSaved } = {}) {
   if (tx) {
     form.type.value = tx.type;
     for (const k of ['amount', 'fee', 'supplier', 'invoice_no', 'description', 'date', 'app_id', 'creditor_id']) if (form[k] && tx[k] != null) form[k].value = tx[k];
+    if (tx.card_part) form.card_part.value = tx.card_part;
     sync();
     form.payment_method.value = tx.payment_method;
     if (tx.category_id) { form.category_id.value = tx.category_id; }
@@ -543,6 +629,7 @@ function bindTxForm(form, { tx = null, onSaved } = {}) {
     e.preventDefault();
     busy(e.submitter || $('button.primary', form), async () => {
       const body = formObj(form);
+      body.card_part = $('[data-f=cardpart]', form).hidden ? 0 : r2(body.card_part);
       if (!$('[data-f=items]', form).hidden) body.items = tog.checked && editor ? editor.read() : [];
       if (tx) await bapi('/transactions/' + tx.id, { method: 'PUT', body });
       else await bapi('/transactions', { method: 'POST', body });
@@ -574,7 +661,8 @@ async function deleteTx(t, after) {
   if (!await confirmBox(T("حذف حركة"), `<p>${T("حذف")} ${esc(S.me.txTypes[t.type])} ${T("بمبلغ")} <b>${money(t.amount)}</b>${T("؟")}<br><span class="muted small">${T("تبقى الحركة محفوظة في سجل المحذوفات")}.</span></p>`, T("حذف"), true)) return;
   try { await bapi('/transactions/' + t.id, { method: 'DELETE' }); toast(T("تم الحذف"), 'ok'); after && after(); } catch (e) { fail(e); }
 }
-const txDesc = (t) => [t.category_name && T(t.category_name), t.supplier, t.app_name && T(t.app_name), t.creditor_name, t.description].filter(Boolean).map(esc).join(' · ');
+const payTag = (t) => !t.card_part ? '' : t.card_part >= t.amount ? ` <span class="badge muted">${icon('card')}${T("شبكة")}</span>` : ` <span class="badge muted">${T("كاش")} ${money(r2(t.amount - t.card_part))} + ${T("شبكة")} ${money(t.card_part)}</span>`;
+const txDesc = (t) => [t.category_name && T(t.category_name), t.supplier, t.app_name && T(t.app_name), t.creditor_name, t.description].filter(Boolean).map(esc).join(' · ') + payTag(t);
 const signedAmount = (t) => {
   const neg = ['purchase', 'expense', 'debt_payment', 'withdrawal', 'debt_writeoff'].includes(t.type);
   const v = t.type === 'adjustment' ? t.amount : neg ? -t.amount : t.amount;
@@ -590,6 +678,7 @@ VIEWS.home = async (el) => {
   el.innerHTML = `
   ${pageHead('home', esc(T(S.meta.business.name)), fmtDate(wd()), `<a class="btn primary" href="#/shift">${icon('receipt')}${T("المشتريات والإقفال")}</a>`)}
   ${d.openShift ? `<div class="banner info">${icon('clock')}<span class="grow">${T("يوم العمل الحالي لم يُقفل بعد")} — <span class="small">${T("مبيعاته تُحتسب عند الإقفال")}</span></span></div>` : ''}
+  ${(d.stale_open || []).map(s => `<div class="banner warn">${icon('alert')}<span class="grow">${T("يوم")} <b>${fmtDate(s.date)}</b> ${T("لم يُقفل — الكاشير انتقل لليوم الحالي. أدخل أرقام إقفاله من «أيام سابقة»")}</span>${can('past_days') ? `<a class="btn sm" href="#/shift" onclick="vCashier.day='${s.date}'">${T("إقفاله الآن")}</a>` : ''}</div>`).join('')}
   ${d.pending_cash ? `<div class="banner warn">${icon('cash')}<span class="grow">${T("يوجد")} <b>${d.pending_cash}</b> ${T("إقفال بانتظار استلام النقد من الكاشير")}</span><a class="btn sm" href="#/shifts">${T("استلام الآن")}</a></div>` : ''}
   <div class="grid kpis">
     ${kpi(T("رصيد الشركة الآن"), d.balance, 'accent', '', 'wallet')}
@@ -615,7 +704,8 @@ function movementTable(m, month = false) {
   if (month) rows.push([("<b>" + T("النتيجة التشغيلية") + "</b>"), m.operating_result, 'b']);
   return `<table><tbody>${rows.map(r => `<tr><td>${r[0]}</td><td class="n" style="text-align:end">${r[2] ? `<b>${M(r[1])}</b>` : M(r[1])}</td></tr>`).join('')}
     <tr><td>${T("عدد الطلبات / متوسط الطلب")}</td><td class="n" style="text-align:end">${m.sales.orders} / ${money(m.sales.avg)}</td></tr>
-    <tr><td>${T("فروقات الجرد")}</td><td style="text-align:end">${m.shifts ? diffBadge(m.cash_diff) : ("<span class=\"muted small\">" + T("لا توجد شفتات مقفلة") + "</span>")}</td></tr>
+    <tr><td>${T("صافي النقد")} <span class="muted small">(${T("الكاش − المدفوع كاش")})</span></td><td class="n" style="text-align:end"><b>${M(m.cash_net)}</b></td></tr>
+    ${S.meta.business.cash_count ? `<tr><td>${T("فروقات الجرد")}</td><td style="text-align:end">${m.shifts ? diffBadge(m.cash_diff) : ("<span class=\"muted small\">" + T("لا توجد شفتات مقفلة") + "</span>")}</td></tr>` : ''}
   </tbody></table>`;
 }
 
@@ -638,7 +728,8 @@ async function vCashier(el) {
   const reload = (t) => { vCashier.tab = t; vCashier(el); };
   const val = (k) => done ? d.shift[k] : '';
   const appVal = (id) => { const a = done && d.shift.apps.find(x => x.app_id === id); return a && a.amount ? a.amount : ''; };
-  const counts = !!S.meta.business.cashier_counts;
+  const counting = !!S.meta.business.cash_count, counts = counting && !!S.meta.business.cashier_counts;
+  const float = sh ? sh.opening_float : (d.cash_float || 0);
   const apps = S.meta.apps.filter(a => a.active);
   const out = sh ? sh.drawer_out : 0;
   el.innerHTML = `<div class="cashier">
@@ -656,7 +747,7 @@ async function vCashier(el) {
     </section>
     <section class="card"><div class="card-head"><h3>${icon('receipt')}${day ? T("مشتريات هذا اليوم") : T("مشتريات اليوم")}</h3><span class="badge muted">${txs.length}</span><b>${M(out)}</b></div>
       ${txs.length ? txs.map(t => `<div class="c-item"><div class="ci-ic">${icon(t.items && t.items.length ? 'package' : 'receipt')}</div><div style="flex:1;min-width:0"><b>${M(t.amount)}</b>
-        <div class="small muted">${esc(t.supplier || t.description || T("بدون اسم"))}${t.invoice_no ? (" · " + T("فاتورة") + " ") + esc(t.invoice_no) : ''} · ${timeOf(t.created_at)}</div>${itemsHTML(t.items)}</div>
+        <div class="small muted">${esc(t.supplier || t.description || T("بدون اسم"))}${t.invoice_no ? (" · " + T("فاتورة") + " ") + esc(t.invoice_no) : ''} · ${timeOf(t.created_at)}${payTag(t)}</div>${itemsHTML(t.items)}</div>
         ${t.created_by === S.me.user.id ? `<button class="icon-btn danger" data-del="${t.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</div>`).join('') : ("<p class=\"muted center\">" + T("لم تُسجّل مشتريات اليوم بعد") + "</p>")}
     </section>` : `
     <section class="card"><form id="fCl" autocomplete="off">
@@ -666,7 +757,7 @@ async function vCashier(el) {
       <div class="sec-title">${icon('truck')}<span class="grow">${T("تطبيقات التوصيل")}</span>${can('settings_manage') ? `<a class="btn sm ghost" href="#/settings/apps">${icon('sliders')}${T("إضافة / تعديل / إخفاء")}</a>` : ''}</div>
       ${apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0" value="${appVal(a.id)}"></label>`).join('') || ("<p class=\"muted small\">" + T("لا توجد تطبيقات ظاهرة") + "</p>")}
       <label><span>${T("عدد الطلبات")} <span class="opt">${T("(اختياري)")}</span></span><input name="orders_count" type="number" min="0" step="1" inputmode="numeric" value="${done && d.shift.orders_count ? d.shift.orders_count : ''}"></label>
-      ${day ? `<label><span>${T("النقد المستلم فعلياً")} <span class="opt">${T("(اختياري)")}</span></span><input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" value="${done && d.shift.counted_at ? d.shift.counted_cash : ''}"></label>` : counts ? `<label class="big">${T("النقد الموجود في الدرج")}<input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" required></label>` : ''}
+      ${day && counting ? `<label><span>${T("النقد المستلم فعلياً")} <span class="opt">${T("(اختياري)")}</span></span><input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" value="${done && d.shift.counted_at ? d.shift.counted_cash : ''}"></label>` : counts ? `<label class="big">${T("النقد الموجود في الدرج")}<input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" required></label>` : ''}
       <label><span>${T("ملاحظات")} <span class="opt">${T("(اختياري)")}</span></span><input name="notes" value="${esc(done ? d.shift.notes || '' : '')}"></label>
       <div class="io" id="io"></div>
       <button class="btn primary block">${icon('lock')}${done ? T("حفظ تعديل الإقفال") : T("إقفال اليوم")}</button>
@@ -701,7 +792,8 @@ async function vCashier(el) {
       <div class="io-sec outs"><div class="io-h">${icon('arrowUp')}${T("الخارج (المشتريات)")}</div>
         <div class="r"><span>${txs.length} ${txs.length === 1 ? T("فاتورة") : T("فواتير")} ${T("من الدرج")}</span>${M(out)}</div></div>
       <div class="io-sec net"><div class="r t"><span>${T("الصافي")} = ${T("الداخل − الخارج")}</span><b class="${x.total - out < 0 ? 'neg-t' : ''}">${M(r2(x.total - out))}</b></div>
-        ${showCash ? `<div class="r"><span class="lbl-ic">${icon('cash')}${T("الكاش بعد المشتريات (المطلوب تسليمه)")}</span><b class="${x.cash - out < 0 ? 'neg-t' : ''}">${M(r2(x.cash - out))}</b></div>` : ''}</div>`;
+        ${showCash ? `<div class="r"><span class="lbl-ic">${icon('cash')}${T("الكاش بعد المشتريات (المطلوب تسليمه)")}</span><b class="${x.cash - out < 0 ? 'neg-t' : ''}">${M(r2(x.cash - out))}</b></div>` : ''}
+        ${showCash && !counting ? `<div class="r"><span>+ ${T("العهدة الثابتة")}</span>${M(float)}</div><div class="r t"><span class="lbl-ic">${icon('wallet')}${T("إجمالي النقد في الدرج")}</span><b>${M(r2(float + x.cash - out))}</b></div>` : ''}</div>`;
   };
   fc.addEventListener('input', draw); draw();
   fc.onsubmit = async (e) => {
@@ -713,6 +805,7 @@ async function vCashier(el) {
       <div class="r t"><span>${T("إجمالي المبيعات")}</span>${M(x.total)}</div>
       <div class="r"><span>${T("المشتريات")}</span>${M(out)}</div>
       ${showCash ? `<div class="r t"><span>${T("الكاش بعد المشتريات")}</span>${M(r2(x.cash - out))}</div>` : ''}
+      ${showCash && !counting ? `<div class="r"><span>${T("إجمالي النقد في الدرج (مع العهدة)")}</span>${M(r2(float + x.cash - out))}</div>` : ''}
       ${counts ? `<div class="r"><span>${T("النقد في الدرج")}</span>${M(fc.counted_cash.value)}</div>` : ''}</div>
       <p class="muted small">${day ? T("يوم العمل") + ' ' + fmtDate(day) : T("تأكد من الأرقام — لا يمكنك تعديلها بعد الإقفال") + '.'}</p>`, done ? T("نعم، احفظ") : T("نعم، أقفل اليوم"));
     if (!ok) return;
@@ -729,21 +822,48 @@ async function vCashier(el) {
   };
 }
 
+// how a purchase was paid: cash from the drawer, by card (شبكة), or part of each
+const payHTML = (split = true) => `<div class="pay-box"><div class="small muted" style="margin-bottom:4px">${T("طريقة الدفع")}</div>
+  <div class="seg full-seg">${[['cash', T("كاش من الدرج")], ['card', T("شبكة")], ...(split ? [['split', T("كاش + شبكة")]] : [])].map(([k, l], i) => `<label><input type="radio" name="pay" value="${k}" ${i ? '' : 'checked'}><span>${l}</span></label>`).join('')}</div>
+  <label class="pay-card" style="display:none;margin-top:8px"><span>${T("المدفوع شبكة")}</span><input name="card_part" type="number" step="0.01" min="0" inputmode="decimal"></label>
+  <p class="muted small pay-note" style="margin:6px 0 0"></p></div>`;
+function bindPay(f, total) {
+  const box = $('.pay-box', f); if (!box) return () => 0;
+  const pay = () => ($('[name=pay]:checked', box) || {}).value || 'cash';
+  const draw = () => {
+    const p = pay(), a = r2(total()), c = r2($('[name=card_part]', box).value);
+    $('.pay-card', box).style.display = p === 'split' ? '' : 'none';
+    $('[name=card_part]', box).required = p === 'split';
+    $('.pay-note', box).textContent = p === 'card' ? T("لا تُخصم من نقد الدرج") : p === 'split' && a ? `${T("يُخصم من الدرج كاش")}: ${money(Math.max(0, r2(a - c)))}` : '';
+  };
+  f.addEventListener('input', draw); f.addEventListener('change', draw); draw();
+  return () => { // the card part to send, or throws a message
+    const p = pay(), a = r2(total());
+    if (p === 'card') return a;
+    if (p !== 'split') return 0;
+    const c = r2($('[name=card_part]', box).value);
+    if (!(c > 0) || c > a) throw new Error(T("المدفوع شبكة يجب أن يكون أكبر من صفر ولا يزيد عن قيمة الفاتورة"));
+    return c;
+  };
+}
 function buyFormHTML(mode) {
   const sup = `<label><span>${T("اسم المحل / المورد")} <span class="opt">${T("(اختياري)")}</span></span><input name="supplier" list="dl-sup"></label>`;
   if (mode === 'multi') return `
     <div class="mrows" id="mRows"></div>
     <button type="button" class="btn sm soft" id="mAdd">${icon('plus')}${T("فاتورة أخرى")}</button>
     <div class="summary-box"><div class="r t" style="border:0;margin:0;padding:0"><span>${T("المجموع")} (<span id="mCnt">0</span> ${T("فواتير")})</span><b class="num" id="mTot">0.00</b></div></div>
+    ${payHTML(false)}
     <button class="btn primary block">${T("حفظ الفواتير")}</button>`;
   if (mode === 'items') return `
     <div class="fgrid">${sup}<label><span>${T("رقم الفاتورة")} <span class="opt">${T("(اختياري)")}</span></span><input name="invoice_no"></label></div>
     <div style="margin:14px 0">${itemsEditorHTML()}</div>
+    ${payHTML()}
     <button class="btn primary block">${T("حفظ الفاتورة")}</button>`;
   return `
     <label class="big">${T("مجموع المشتريات")}<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required></label>
     <div class="fgrid"><label><span>${T("عدد الفواتير")} <span class="opt">${T("(اختياري)")}</span></span><input name="count" type="number" min="1" step="1" inputmode="numeric"></label>${sup}</div>
     <label><span>${T("ملاحظة")} <span class="opt">${T("(اختياري)")}</span></span><input name="description" placeholder="${T("مثال: خضار، غاز، أكياس…")}"></label>
+    ${payHTML()}
     <button class="btn primary block">${T("حفظ")}</button>`;
 }
 function bindBuyForm(f, mode, done, day) {
@@ -766,9 +886,11 @@ function bindBuyForm(f, mode, done, day) {
     $('#mAdd', f).onclick = () => $('[data-k=amount]', add()).focus();
     add(); add(); add();
     supplierMemory({ addEventListener() { }, supplier: { value: '' } });
+    bindPay(f, () => 0);
     f.onsubmit = (e) => {
       e.preventDefault();
-      const entries = $$('.mrow', box).map(r => ({ ...base, amount: r2($('[data-k=amount]', r).value), supplier: $('[data-k=supplier]', r).value.trim() })).filter(x => x.amount > 0);
+      const card = ($('[name=pay]:checked', f) || {}).value === 'card';
+      const entries = $$('.mrow', box).map(r => ({ ...base, amount: r2($('[data-k=amount]', r).value), supplier: $('[data-k=supplier]', r).value.trim() })).filter(x => x.amount > 0).map(x => ({ ...x, card_part: card ? x.amount : 0 }));
       if (!entries.length) return toast(T("اكتب مبلغ فاتورة واحدة على الأقل"), 'err');
       busy(e.submitter, async () => {
         const r = await bapi('/transactions/batch', { method: 'POST', body: { entries } });
@@ -781,25 +903,30 @@ function bindBuyForm(f, mode, done, day) {
   supplierMemory(f);
   if (mode === 'items') {
     const ed = bindItems(f, []);
+    const cardPart = bindPay(f, () => ed.total());
     f.onsubmit = (e) => {
       e.preventDefault();
       const items = ed.read();
       if (!items.length || !(ed.total() > 0)) return toast(T("أضف صنفاً واحداً على الأقل بسعره"), 'err');
+      let card_part; try { card_part = cardPart(); } catch (er) { return toast(er.message, 'err'); }
       busy(e.submitter, async () => {
-        await bapi('/transactions', { method: 'POST', body: { ...base, ...formObj(f), items } });
+        const { pay, ...fo } = formObj(f);
+        await bapi('/transactions', { method: 'POST', body: { ...base, ...fo, items, card_part } });
         toast(`${T("تم حفظ الفاتورة")} — ${money(ed.total())} ✓`, 'ok'); done();
       });
     };
     setTimeout(() => $('[data-k=name]', f).focus(), 50);
     return;
   }
+  const cardPart = bindPay(f, () => f.amount.value);
   f.onsubmit = (e) => {
     e.preventDefault();
-    const { count, ...rest } = formObj(f);
+    const { count, pay, ...rest } = formObj(f);
     const n = parseInt(count);
     const description = [n > 1 ? `${T("مجموع")} ${n} ${T("فواتير")}` : '', rest.description].filter(Boolean).join(' — ');
+    let card_part; try { card_part = cardPart(); } catch (er) { return toast(er.message, 'err'); }
     busy(e.submitter, async () => {
-      await bapi('/transactions', { method: 'POST', body: { ...base, ...rest, description } });
+      await bapi('/transactions', { method: 'POST', body: { ...base, ...rest, description, card_part } });
       toast((T("تم الحفظ") + " ✓"), 'ok'); done();
     });
   };
@@ -830,7 +957,7 @@ VIEWS.tx = async (el) => {
     rows.forEach(t => { sumBy[t.type] = (sumBy[t.type] || 0) + t.amount; });
     $('#txList').innerHTML = rows.length ? `<div class="row small" style="margin-bottom:12px">${Object.entries(sumBy).map(([k, v]) => `<span class="badge muted">${S.me.txTypes[k]}: ${money(v)}</span>`).join('')}<span class="muted">${rows.length} ${T("حركة")}</span></div>
       <div class="tbl-wrap"><table><thead><tr><th>${T("التاريخ")}</th><th>${T("النوع")}</th><th>${T("البيان")}</th><th>${T("الفاتورة")}</th><th>${T("الدفع")}</th><th>${T("المبلغ")}</th><th>${T("بواسطة")}</th><th></th></tr></thead><tbody>
-      ${rows.map(t => `<tr class="${t.deleted_at ? 'deleted' : ''}"><td class="small" style="white-space:nowrap">${t.date}</td><td>${esc(S.me.txTypes[t.type])}</td><td>${txDesc(t)}</td><td class="small">${esc(t.invoice_no || '')}</td>
+      ${rows.map(t => `<tr class="${t.deleted_at ? 'deleted' : ''}"><td class="small" style="white-space:nowrap">${dayName(t.date)}<br>${t.date}</td><td>${esc(S.me.txTypes[t.type])}</td><td>${txDesc(t)}</td><td class="small">${esc(t.invoice_no || '')}</td>
         <td class="small">${esc(S.me.methods[t.payment_method])}</td><td>${signedAmount(t)}${t.fee ? `<div class="small muted">${T("عمولة")} ${money(t.fee)}</div>` : ''}</td>
         <td class="small muted">${esc(t.created_by_name || '')}${t.deleted_at ? `<br>${T("حذفها")} ${esc(t.deleted_by_name)}` : ''}</td>
         <td style="white-space:nowrap">${!t.deleted_at && can('tx_edit') ? `<button class="icon-btn" data-ed="${t.id}">${icon('edit')}</button><button class="icon-btn danger" data-del="${t.id}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}
@@ -875,7 +1002,7 @@ VIEWS.expenses = async (el) => {
         <section class="card"><h3>${icon('info')}${T("ملاحظة")}</h3><p class="muted" style="margin:0">${T("المصروف المدفوع من الدرج يدخل في جرد اليوم، ومن حساب الشركة يُخصم من الرصيد، وعلى الدين يُضاف لحساب الدائن. التصنيفات تُعدّل من «إعدادات النشاط»")}.</p></section>
       </div>
       <section class="card">${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("التاريخ")}</th><th>${T("التصنيف")}</th><th>${T("البيان")}</th><th>${T("الدفع")}</th><th>${T("المبلغ")}</th><th></th></tr></thead><tbody>
-        ${rows.map(t => `<tr><td class="small num">${t.date}</td><td>${t.category_name ? `<span class="badge muted">${esc(T(t.category_name))}</span>` : ''}</td><td class="small">${esc([t.supplier, t.creditor_name, t.description].filter(Boolean).join(' · '))}${itemsHTML(t.items)}</td>
+        ${rows.map(t => `<tr><td class="small" style="white-space:nowrap">${dayName(t.date)}<br>${t.date}</td><td>${t.category_name ? `<span class="badge muted">${esc(T(t.category_name))}</span>` : ''}</td><td class="small">${esc([t.supplier, t.creditor_name, t.description].filter(Boolean).join(' · '))}${itemsHTML(t.items)}</td>
           <td class="small muted">${esc(S.me.methods[t.payment_method])}</td><td class="n"><b>${money(t.amount)}</b></td>
           <td class="row-acts">${can('tx_edit') ? `<button class="icon-btn" data-ed="${t.id}" title="${T("تعديل")}">${icon('edit')}</button><button class="icon-btn danger" data-del="${t.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}
         </tbody></table></div>` : `<div class="empty">${T("لا توجد مصروفات في هذه الفترة")}</div>`}</section>`;
@@ -889,7 +1016,9 @@ VIEWS.expenses = async (el) => {
 
 /* ═════════════════════════ shifts history ═════════════════════════ */
 const countBadge = (s) => s.status === 'open' ? ("<span class=\"badge info\">" + T("لم يُقفل بعد") + "</span>")
-  : !s.counted_at ? ("<span class=\"badge warn\">" + T("بانتظار استلام النقد") + "</span>") : diffBadge(s.difference);
+  : s.counted_at ? diffBadge(s.difference) // an old count keeps its result
+  : !S.meta.business.cash_count ? (s.expected_cash !== undefined ? `<span class="badge muted" title="${T("العهدة + الكاش − ما دُفع كاش من الدرج")}">${money(s.expected_cash)}</span>` : '—')
+  : ("<span class=\"badge warn\">" + T("بانتظار استلام النقد") + "</span>");
 const shiftTotal = (s) => r2(s.cash_sales + s.card_sales + s.app_sales);
 
 VIEWS.shifts = async (el) => {
@@ -900,9 +1029,9 @@ VIEWS.shifts = async (el) => {
   const load = async () => {
     Object.assign(st, formObj($('#fF')));
     const rows = await bapi('/shifts?' + new URLSearchParams(st));
-    const pending = rows.filter(s => s.status === 'closed' && !s.counted_at).length;
+    const pending = S.meta.business.cash_count ? rows.filter(s => s.status === 'closed' && !s.counted_at).length : 0;
     $('#shList').innerHTML = (pending ? `<div class="alert warn">${pending} ${T("إقفال بانتظار استلام النقد — اضغط عليه ثم «استلام النقد»")}.</div>` : '') +
-      (rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("اليوم")}</th><th>${T("أقفله")}</th><th>${T("نقدي")}</th><th>${T("بطاقة")}</th><th>${T("تطبيقات")}</th><th>${T("الإجمالي")}</th><th>${T("النقد")}</th></tr></thead><tbody>
+      (rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("اليوم")}</th><th>${T("أقفله")}</th><th>${T("نقدي")}</th><th>${T("بطاقة")}</th><th>${T("تطبيقات")}</th><th>${T("الإجمالي")}</th><th>${S.meta.business.cash_count ? T("النقد") : T("إجمالي النقد")}</th></tr></thead><tbody>
       ${rows.map(s => `<tr class="click" data-id="${s.id}"><td style="white-space:nowrap">${fmtDate(s.date)}</td>
         <td class="small">${s.status === 'open' ? `<span class="muted">${esc(s.opened_by_name || '')}</span>` : `${esc(s.closed_by_name || '')}<br><span class="muted">${timeOf(s.closed_at)}</span>`}</td>
         <td class="n">${money(s.cash_sales)}</td><td class="n">${money(s.card_sales)}</td><td class="n">${money(s.app_sales)}</td><td class="n"><b>${money(shiftTotal(s))}</b></td>
@@ -929,24 +1058,30 @@ async function shiftDetail(id, after) {
       <div class="r t"><span>${T("الإجمالي")}</span>${M(shiftTotal(s))}</div>
       <div class="r"><span>${T("عدد الطلبات")}</span><span>${s.orders_count}</span></div><div class="r"><span>${T("رسوم البطاقة")}</span>${M(s.card_fee)}</div></div></div>
       <div><h4>${T("النقد")}</h4><div class="summary-box">
-      <div class="r"><span>${T("العهدة")}</span>${M(s.opening_float)}</div><div class="r"><span>${T("فواتير مدفوعة من الدرج")}</span>${M(s.drawer_out)}</div>
-      ${s.expected_cash !== undefined ? `<div class="r"><span>${T("النقد المتوقع")}</span><b>${M(s.expected_cash)}</b></div>` : ''}
+      <div class="r"><span>${T("العهدة")}</span>${M(s.opening_float)}</div><div class="r"><span>+ ${T("كاش المبيعات")}</span>${M(s.cash_sales)}</div><div class="r"><span>− ${T("مدفوع كاش من الدرج")}</span>${M(s.drawer_out)}</div>
+      ${s.expected_cash !== undefined ? `<div class="r t"><span>${S.meta.business.cash_count ? T("النقد المتوقع") : T("إجمالي النقد")}</span><b>${M(s.expected_cash)}</b></div>` : ''}
       ${s.counted_at ? `<div class="r"><span>${T("النقد المستلم / المعدود")}</span>${M(s.counted_cash)}</div><div class="r"><span>${T("عند الموظفين")}</span>${M(s.cash_with_staff)}</div>` : ''}
-      <div class="r t"><span>${T("النتيجة")}</span>${countBadge(s)}</div></div></div></div>
+      ${S.meta.business.cash_count || s.counted_at ? `<div class="r t"><span>${T("النتيجة")}</span>${countBadge(s)}</div>` : ''}</div></div></div>
       ${s.notes ? `<p><b>${T("ملاحظات:")}</b> ${esc(s.notes)}</p>` : ''}` : ''}
     <h4>${T("الفواتير والحركات")} (${s.transactions.length})</h4>
     ${s.transactions.length ? `<div class="tbl-wrap"><table><tbody>${s.transactions.map(t => `<tr><td>${esc(S.me.txTypes[t.type])}</td><td>${txDesc(txCat(t))}<div class="small muted">${esc(t.created_by_name)} ${timeOf(t.created_at)}</div></td>
       <td class="n">${money(t.amount)}</td><td style="white-space:nowrap">${can('tx_edit') ? `<button class="icon-btn" data-ed="${t.id}" title="${T("تعديل")}">${icon('edit')}</button><button class="icon-btn danger" data-del="${t.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : ("<p class=\"muted\">" + T("لا توجد") + "</p>")}
     ${edit ? `<div class="mf" style="flex-wrap:wrap">
-      <button class="btn primary" id="bRecv">${icon('cash')}${s.counted_at ? T("تعديل النقد المستلم") : T("استلام النقد")}</button>
+      ${S.meta.business.cash_count ? `<button class="btn primary" id="bRecv">${icon('cash')}${s.counted_at ? T("تعديل النقد المستلم") : T("استلام النقد")}</button>` : ''}
       <button class="btn" id="bEdit">${icon('edit')}${T("تعديل أرقام الإقفال")}</button>
-      <button class="btn danger" id="bReopen">${icon('undo')}${T("إلغاء الإقفال")}</button></div>
-      <p class="muted small">${T("كل تعديل يُسجّل في «سجل التعديلات» باسمك مع القيمة قبل وبعد")}.</p>` : ''}`, { wide: true });
+      <button class="btn" id="bReopen">${icon('undo')}${T("إلغاء الإقفال")}</button>
+      <button class="btn danger" id="bDelSh">${icon('trash')}${T("حذف الإقفال")}</button></div>
+      <p class="muted small">${T("كل تعديل يُسجّل في «سجل التعديلات» باسمك مع القيمة قبل وبعد")}.</p>` : ''}
+    ${s.status === 'open' && can('shift_reopen') ? `<div class="mf" style="flex-wrap:wrap">
+      <button class="btn primary" id="bCloseOld">${icon('lock')}${T("إقفال هذا اليوم")}</button>
+      <button class="btn danger" id="bDelSh">${icon('trash')}${T("حذف هذا اليوم")}</button></div>` : ''}`, { wide: true });
   const refresh = () => { m.close(); after && after(); shiftDetail(id, after); };
   $$('[data-ed]', m.el).forEach(b => b.onclick = () => openTxModal({ tx: s.transactions.find(t => t.id == b.dataset.ed), onSaved: refresh }));
   $$('[data-del]', m.el).forEach(b => b.onclick = () => deleteTx(s.transactions.find(t => t.id == b.dataset.del), refresh));
+  const del = $('#bDelSh', m.el); if (del) del.onclick = () => deleteShift(s, () => { m.close(); after && after(); });
+  const co = $('#bCloseOld', m.el); if (co) co.onclick = () => closeOpenShift(s, () => { m.close(); after && after(); });
   if (!edit) return;
-  $('#bRecv', m.el).onclick = () => receiveCash(s, refresh);
+  if ($('#bRecv', m.el)) $('#bRecv', m.el).onclick = () => receiveCash(s, refresh);
   $('#bEdit', m.el).onclick = () => editShift(s, refresh);
   $('#bReopen', m.el).onclick = async () => {
     if (!await confirmBox(T("إلغاء الإقفال"), ("<p>" + T("سيُلغى الإقفال ويعود اليوم مفتوحاً حتى يُقفل مجدداً. للتصحيح البسيط استخدم «تعديل أرقام الإقفال» بدلاً من ذلك. متابعة؟") + "</p>"), T("إلغاء الإقفال"), true)) return;
@@ -954,12 +1089,61 @@ async function shiftDetail(id, after) {
   };
 }
 
+// the owner / manager closes any day left open (e.g. the cashier forgot to close it), whatever its date
+function closeOpenShift(s, after) {
+  const apps = S.meta.apps.filter(a => a.active);
+  const counting = !!S.meta.business.cash_count;
+  const m = modal(`${T("إقفال يوم")} ${fmtDate(s.date)}`, `<form autocomplete="off">
+    <div class="summary-box"><div class="r"><span>${T("فتحه")}</span><span>${esc(s.opened_by_name || '')} — ${s.opened_at}</span></div>
+      <div class="r"><span>${T("الفواتير والحركات")}</span><b>${s.transactions.length}</b> · ${M(s.drawer_out)}</div></div>
+    <div class="fgrid">
+      <label>${T("نقدي")}<input name="cash_sales" type="number" step="0.01" inputmode="decimal" required></label>
+      <label>${T("بطاقة / شبكة")}<input name="card_sales" type="number" step="0.01" min="0" inputmode="decimal" required></label>
+      ${apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"></label>`).join('')}
+      <label>${T("عدد الطلبات")} <input name="orders_count" type="number" min="0" step="1" inputmode="numeric"></label>
+      ${counting ? `<label>${T("النقد المستلم فعلياً")} <span class="opt">${T("(اختياري)")}</span><input name="counted_cash" type="number" step="0.01" inputmode="decimal"></label>` : ''}
+      <label class="full">${T("ملاحظات")}<input name="notes"></label>
+    </div>
+    <div class="summary-box"><div class="r"><span>${T("العهدة")}</span>${M(s.opening_float)}</div><div class="r"><span>− ${T("مدفوع كاش من الدرج")}</span>${M(s.drawer_out)}</div>
+      <div class="r t"><span>${T("إجمالي النقد")}</span><b id="coCash"></b></div></div>
+    <p class="hint">${icon('info')}<span>${T("يُقفل هذا اليوم بتاريخه، ويُسجّل الإقفال باسمك في «سجل التعديلات»")}.</span></p>
+    <div class="mf"><button class="btn primary">${icon('lock')}${T("إقفال هذا اليوم")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`, { wide: true });
+  const f = $('form', m.el);
+  const draw = () => { $('#coCash', m.el).innerHTML = M(r2(s.opening_float + r2(f.cash_sales.value) - s.drawer_out)); };
+  f.oninput = draw; draw();
+  f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+    const body = { ...formObj(f), apps: $$('[data-app]', f).map(i => ({ app_id: Number(i.dataset.app), amount: r2(i.value) })) };
+    await bapi(`/shifts/${s.id}/close`, { method: 'POST', body });
+    m.close(); await loadMeta(); toast(`${T("تم إقفال يوم")} ${fmtDate(s.date)}`, 'ok'); after();
+  }); };
+}
+
+// delete a wrong closing (e.g. a day recorded twice): its invoices move to another day or go with it
+async function deleteShift(s, after) {
+  const near = (await bapi('/shifts?' + new URLSearchParams({ from: addDays(s.date, -7), to: addDays(s.date, 7) }))).filter(x => x.id !== s.id);
+  const n = s.transactions.length;
+  const m = modal(`${T("حذف إقفال يوم")} ${fmtDate(s.date)}`, `<form>
+    <div class="summary-box"><div class="r"><span>${T("المبيعات")}</span>${M(shiftTotal(s))}</div><div class="r"><span>${T("الفواتير والحركات")}</span><b>${n}</b> · ${M(s.drawer_out)}</div></div>
+    ${n ? `<div class="sec-title">${T("ماذا نفعل بفواتير هذا اليوم؟")}</div>
+      <label class="check"><input type="radio" name="what" value="move" ${near.length ? 'checked' : 'disabled'}> ${T("نقلها إلى إقفال يوم آخر")}</label>
+      <select name="move_to" style="margin:6px 0 10px" ${near.length ? '' : 'disabled'}>${near.map(x => `<option value="${x.id}">${fmtDate(x.date)} — ${x.status === 'open' ? T("مفتوح") : money(shiftTotal(x))}</option>`).join('')}</select>
+      <label class="check"><input type="radio" name="what" value="delete" ${near.length ? '' : 'checked'}> ${T("حذفها مع الإقفال")}</label>` : ''}
+    <p class="hint">${icon('alert')}<span>${T("يُحذف الإقفال نهائياً ويُسجّل في «سجل التعديلات» بكل أرقامه، ويُعاد حساب الرصيد")}.</span></p>
+    <div class="mf"><button class="btn danger">${icon('trash')}${T("حذف الإقفال")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`);
+  const f = $('form', m.el);
+  f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+    const move = n && f.what && f.what.value === 'move' ? f.move_to.value : undefined;
+    const r = await bapi('/shifts/' + s.id, { method: 'DELETE', body: { move_to: move } });
+    m.close(); await loadMeta(); toast(r.moved_to ? `${T("تم الحذف ونُقلت الفواتير إلى يوم")} ${fmtDate(r.moved_to)}` : T("تم حذف الإقفال"), 'ok'); after();
+  }); };
+}
 function receiveCash(s, after) {
   const m = modal(T("استلام النقد من الكاشير"), `<form>
     <div class="summary-box"><div class="r"><span>${T("كاش المبيعات")}</span>${M(s.cash_sales)}</div><div class="r"><span>− ${T("فواتير من الدرج")}</span>${M(s.drawer_out)}</div>
       <div class="r"><span>+ ${T("العهدة")}</span>${M(s.opening_float)}</div><div class="r t"><span>${T("النقد المتوقع")}</span>${M(s.expected_cash)}</div></div>
-    <div class="fgrid"><label class="big">${T("المبلغ المستلم / المعدود")}<input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" required value="${s.counted_at ? s.counted_cash : ''}"></label>
-    <label>${T("نقد عند الموظفين")}<input name="cash_with_staff" type="number" step="0.01" min="0" inputmode="decimal" value="${s.counted_at ? s.cash_with_staff : 0}"></label></div>
+    <div class="fgrid"><label class="big">${T("المبلغ المستلم / المعدود")}<input name="counted_cash" type="number" step="0.01" inputmode="decimal" required value="${s.counted_at ? s.counted_cash : ''}"></label>
+    <label>${T("نقد عند الموظفين")}<input name="cash_with_staff" type="number" step="0.01" inputmode="decimal" value="${s.counted_at ? s.cash_with_staff : 0}"></label></div>
+    <p class="hint">${icon('info')}<span>${T("يمكن إدخال مبلغ بالسالب، مثلاً إذا كانت المشتريات أكبر من كاش المبيعات ودفع الكاشير الفرق من عنده")}.</span></p>
     <div class="summary-box"><div class="r"><span>${T("النتيجة")}</span><span id="rcvRes"></span></div></div>
     <div class="mf"><button class="btn primary">${T("حفظ")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`);
   const f = $('form', m.el);
@@ -972,12 +1156,13 @@ function editShift(s, after) {
   const m = modal(T("تعديل أرقام الإقفال"), `<form>
     <div class="fgrid">
       <label>${T("يوم العمل")}<input type="date" name="date" value="${s.date}" required></label>
-      <label>${T("نقدي")}<input name="cash_sales" type="number" step="0.01" min="0" required value="${s.cash_sales}"></label>
+      <label>${T("نقدي")}<input name="cash_sales" type="number" step="0.01" required value="${s.cash_sales}"></label>
       <label>${T("بطاقة / شبكة")}<input name="card_sales" type="number" step="0.01" min="0" required value="${s.card_sales}"></label>
       ${s.apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.app_id}" type="number" step="0.01" min="0" value="${a.amount || ''}" placeholder="0"></label>`).join('')}
       <label>${T("عدد الطلبات")}<input name="orders_count" type="number" min="0" step="1" value="${s.orders_count}"></label>
-      ${s.counted_at ? `<label>${T("النقد المستلم / المعدود")}<input name="counted_cash" type="number" step="0.01" min="0" value="${s.counted_cash}"></label>
-      <label>${T("نقد عند الموظفين")}<input name="cash_with_staff" type="number" step="0.01" min="0" value="${s.cash_with_staff}"></label>` : ''}
+      ${s.counted_at && !S.meta.business.cash_count ? `<label class="check full"><input type="checkbox" name="clear_count" value="1"> ${T("حذف نتيجة العدّ القديمة لهذا اليوم (العجز / الزيادة)")} — ${diffBadge(s.difference)}</label>` : ''}
+      ${s.counted_at && S.meta.business.cash_count ? `<label>${T("النقد المستلم / المعدود")}<input name="counted_cash" type="number" step="0.01" value="${s.counted_cash}"></label>
+      <label>${T("نقد عند الموظفين")}<input name="cash_with_staff" type="number" step="0.01" value="${s.cash_with_staff}"></label>` : ''}
       <label class="full">${T("ملاحظات")}<input name="notes" value="${esc(s.notes || '')}"></label>
     </div>
     <p class="hint">${T("سيُسجّل التعديل باسمك مع القيم قبل وبعد، ويُعاد حساب الرصيد ونتيجة الجرد تلقائياً")}.</p>
@@ -994,6 +1179,10 @@ function editShift(s, after) {
 
 /* ═════════════════════════ edits log ═════════════════════════ */
 const F_L = {
+  member: T("العضو"), month: T("الشهر"), monthly: T("الاشتراك الشهري"), from_month: T("من شهر"), parent: T("الأب / الأم"), category: T("الفئة"), contributing: T("مساهم"),
+  join_month: T("شهر الانضمام"), left_month: T("شهر الخروج"), guardian_access: T("متابعة الأب"), notes: T("ملاحظات"), installment: T("القسط"), start_month: T("بداية الأقساط"),
+  anonymous: T("مجهول"), amount: T("المبلغ"), due_day: T("يوم الاستحقاق"), loan_multiplier: T("مضاعف حد القرض"), apply_from: T("يُطبّق من"), members: T("عدد الأعضاء"),
+  issued_date: T("تاريخ الصرف"), over_limit: T("تجاوز الحد"), username: T("اسم الدخول"),
   type: T("النوع"), payment_method: T("طريقة الدفع"), amount: T("المبلغ"), fee: T("العمولة"), date: T("التاريخ"), category: T("التصنيف"), supplier: T("المورد"),
   invoice_no: T("رقم الفاتورة"), creditor: T("الدائن"), app: T("التطبيق"), description: T("الملاحظة"), cash_sales: T("الكاش"), card_sales: T("الشبكة"),
   orders_count: T("عدد الطلبات"), counted_cash: T("النقد المستلم"), cash_with_staff: T("نقد عند الموظفين"), difference: T("نتيجة الجرد"), notes: T("الملاحظات"),
@@ -1001,11 +1190,16 @@ const F_L = {
   debt: T("الدين المتبقي"), movements: T("الحركات المحذوفة معه"), name: T("الاسم"), kind: T("النوع"), opening_receivable: T("الآجل الافتتاحي"), active: T("فعّال"),
 };
 const AUDIT_ACTIONS = {
+  fund_payment: [T("تسجيل دفعة"), 'pos'], fund_payment_delete: [T("حذف دفعة"), 'neg'], fund_member_create: [T("إضافة عضو"), 'pos'], fund_member_update: [T("تعديل عضو"), 'warn'],
+  fund_member_delete: [T("حذف عضو"), 'neg'], fund_rate: [T("تغيير الاشتراك الشهري"), 'warn'], fund_settings: [T("تعديل إعدادات الصندوق"), 'warn'],
+  fund_category_create: [T("إضافة فئة اشتراك"), 'pos'], fund_category_update: [T("تعديل فئة اشتراك"), 'warn'], fund_loan_create: [T("تسجيل قرض"), 'info'],
+  fund_loan_update: [T("تعديل قرض"), 'warn'], fund_loan_delete: [T("حذف قرض"), 'neg'], fund_account_create: [T("إنشاء حساب دخول لعضو"), 'pos'], fund_account_password: [T("تغيير كلمة مرور عضو"), 'warn'], fund_account_link: [T("ربط عضو بحساب موجود"), 'pos'], fund_account_unlink: [T("فك ربط حساب عضو"), 'warn'], fund_import: [T("استيراد بيانات"), 'info'],
+  fund_request_create: [T("طلب قرض جديد"), 'info'], fund_request_cancel: [T("إلغاء طلب قرض"), 'muted'], fund_request_reject: [T("رفض طلب قرض"), 'neg'], fund_request_approve: [T("موافقة على طلب قرض"), 'pos'], fund_banner: [T("تعديل البانرات"), 'muted'], fund_banner_delete: [T("حذف بانر"), 'neg'], fund_report_request: [T("طلب عرض التقرير بالأسماء"), 'info'], fund_report_approve: [T("موافقة على عرض الأسماء"), 'warn'], fund_report_reject: [T("رفض عرض الأسماء"), 'muted'], fund_report_revoke: [T("إيقاف عرض الأسماء"), 'muted'], fund_goal_create: [T("هدف جديد"), 'pos'], fund_goal_update: [T("تعديل هدف"), 'warn'], fund_goal_delete: [T("حذف هدف"), 'neg'], fund_gift: [T("مساهمة في هدف"), 'pos'], fund_gift_delete: [T("حذف مساهمة"), 'neg'], fund_statements_send: [T("إرسال الكشوفات الشهرية"), 'info'],
   tx_create: [T("إضافة فاتورة/حركة"), 'pos'], tx_update: [T("تعديل حركة"), 'warn'], tx_delete: [T("حذف حركة"), 'neg'],
   shift_open: [T("بدء يوم عمل (تلقائي)"), 'muted'], shift_close: [T("إقفال يوم"), 'pos'], shift_edit: [T("تعديل أرقام إقفال"), 'warn'], shift_reopen: [T("إلغاء إقفال"), 'neg'],
   cash_receive: [T("استلام النقد"), 'info'], settings_update: [T("تعديل الإعدادات"), 'warn'], logo_update: [T("تغيير الشعار"), 'warn'],
   theme_update: [T("تغيير المظهر"), 'muted'], business_reset: [T("تصفير بيانات النشاط"), 'neg'],
-  login: [T("تسجيل دخول"), 'muted'], login_failed: [T("محاولة دخول فاشلة"), 'neg'], password_change: [T("تغيير كلمة المرور"), 'warn'], backup_download: [T("تنزيل نسخة احتياطية"), 'info'],
+  login: [T("تسجيل دخول"), 'muted'], password_reset_request: [T("طلب استعادة كلمة المرور"), 'warn'], login_failed: [T("محاولة دخول فاشلة"), 'neg'], password_change: [T("تغيير كلمة المرور"), 'warn'], shift_delete: [T("حذف إقفال"), 'neg'], admin_recovery: [T("استعادة كلمة مرور المالك من الاستضافة"), 'neg'], backup_download: [T("تنزيل نسخة احتياطية"), 'info'],
   apps_create: [T("إضافة تطبيق"), 'pos'], apps_update: [T("تعديل تطبيق"), 'warn'], categories_create: [T("إضافة تصنيف"), 'pos'], categories_update: [T("تعديل تصنيف"), 'warn'],
   creditors_create: [T("إضافة دائن"), 'pos'], creditors_update: [T("تعديل دائن"), 'warn'], creditors_delete: [T("حذف دائن"), 'neg'],
 };
@@ -1013,7 +1207,9 @@ function fmtVal(k, v) {
   if (v === null || v === undefined || v === '') return '—';
   if (k === 'type') return S.me.txTypes[v] || v;
   if (k === 'payment_method') return S.me.methods[v] || v;
-  if (k === 'kind') return v === 'expense' ? T("مصروفات") : T("مشتريات");
+  if (k === 'kind') return v === 'dues' ? T("اشتراك") : v === 'installment' ? T("قسط قرض") : v === 'expense' ? T("مصروفات") : T("مشتريات");
+  if (['contributing', 'guardian_access', 'anonymous'].includes(k)) return v ? T("نعم") : T("لا");
+  if (['due_day', 'members', 'loan_multiplier'].includes(k)) return String(v);
   if (k === 'active' || k === 'cashier_counts') return v ? T("نعم") : T("لا");
   if (typeof v === 'number') return ['orders_count', 'day_start_hour'].includes(k) ? String(v) : money(v);
   return T(String(v));
@@ -1040,11 +1236,18 @@ function auditBody(r) {
   const d = r.details || {};
   switch (r.action) {
     case 'tx_create': return txLine(d.after || d);
+    case 'fund_payment': return `<b>${money(d.amount)}</b> · ${fmtVal('kind', d.kind)} · ${T("شهر")} <span class="num">${esc(d.month)}</span>`;
+    case 'fund_payment_delete': return `<span class="muted">${T("المحذوف:")}</span> <b>${money(d.before?.amount)}</b> · ${fmtVal('kind', d.before?.kind)} · ${T("شهر")} <span class="num">${esc(d.before?.month || '')}</span>`;
+    case 'fund_gift': return `<b>${money(d.amount)}</b> · ${esc(d.goal || '')} · ${esc(d.member || '')}`;
+    case 'fund_statements_send': return `${T("شهر")} <span class="num">${esc(d.month || '')}</span> · ${d.sent} ${T("كشف")}${d.auto ? ` · ${T("تلقائي")}` : ''}`;
+    case 'fund_rate': return `${T("من شهر")} <span class="num">${esc(d.from_month)}</span>: ${changesHTML(d.before, d.after)}`;
+    case 'fund_account_create': case 'fund_account_password': case 'fund_account_link': case 'fund_account_unlink': return esc(d.username || '');
     case 'tx_delete': return `<span class="muted">${T("المحذوف:")}</span> ${txLine(d.before || d)}`;
     case 'shift_close': return d.after ? shiftLine(d.after) : '';
-    case 'login': case 'login_failed': case 'password_change': case 'backup_download':
+    case 'login': case 'login_failed': case 'password_change': case 'backup_download': case 'password_reset_request':
       return [d.username ? esc(d.username) : '', d.ip ? `<span class="num muted">IP ${esc(d.ip)}</span>` : ''].filter(Boolean).join(' · ');
     case 'creditors_delete': return Object.entries(d.before || {}).map(([k, v]) => `${F_L[k] || k}: ${esc(fmtVal(k, v))}`).join(' · ');
+    case 'shift_delete': return `${T("يوم")} <span class="num">${esc(d.date || '')}</span>${d.before ? ` · ${shiftLine(d.before)}` : ''} · ${d.invoices || 0} ${T("فاتورة")}${d.moved_to ? ` → ${T("نُقلت إلى")} <span class="num">${esc(d.moved_to)}</span>` : ''}`;
     case 'shift_reopen': return d.before ? `<span class="muted">${T("قبل الفتح:")}</span> ${shiftLine(d.before)}` : '';
     case 'shift_open': return d.auto ? ("<span class=\"muted small\">" + T("تلقائياً مع أول عملية") + "</span>") : '';
     case 'cash_receive': return d.before && d.before.counted_cash === null
@@ -1059,8 +1262,11 @@ function auditBody(r) {
 const auditObj = (r) => {
   const d = r.details || {};
   if (r.action.startsWith('tx_')) return `${T("حركة")} #${d.id ?? ''}`;
-  if (r.action.startsWith('shift_') || r.action === 'cash_receive') return d.date ? `${T("يوم")} ${d.date}` : '';
+  if (r.action.startsWith('shift_') || r.action === 'cash_receive') return d.date ? `${T("يوم")} ${fmtDate(d.date)}` : '';
+  if (d.member) return d.member;
+  if (d.before?.member || d.after?.member) return d.before?.member || d.after?.member;
   if (d.after?.name) return d.after.name;
+  if (d.before?.name) return d.before.name;
   return '';
 };
 
@@ -1134,7 +1340,9 @@ async function dailyReport(box) {
   const drawer = d.shifts.length ? d.shifts.map((s, i) => `<div class="drawer-card"><div class="dc-h">${icon('cash')}<span class="grow">${d.shifts.length > 1 ? `${T("إقفال")} ${i + 1} — ` : ''}${esc(s.closed_by_name || s.opened_by_name || '')}${s.closed_at ? ` <span class="muted small">${timeOf(s.closed_at)}</span>` : ''}</span>${countBadge(s)}</div>
       ${s.status === 'open' ? '' : `
       ${rl(T("العهدة الثابتة في الدرج"), s.opening_float, { note: T("لا تُحصر من المبيعات") })}
-      ${rl(T("النقد المتوقع"), s.expected_cash, { note: T("العهدة + الكاش − فواتير الدرج") })}
+      ${!S.meta.business.cash_count ? `${rl(T("كاش المبيعات") + ' +', s.cash_sales, { cls: 'plus' })}${s.drawer_out ? rl(T("مدفوع كاش من الدرج") + ' −', s.drawer_out, { cls: 'minus' }) : ''}
+      ${rl(T("إجمالي النقد في الدرج"), s.expected_cash, { note: T("العهدة + الكاش − ما دُفع كاش من الدرج"), cls: 'total' })}
+      ${rl(T("صافي النقد (بلا العهدة)"), r2(s.expected_cash - s.opening_float), { cls: 'hl' })}` : rl(T("النقد المتوقع"), s.expected_cash, { note: T("العهدة + الكاش − فواتير الدرج") })}
       ${s.counted_at ? `${rl(T("الدرج المعدود فعلاً"), s.counted_cash)}${s.cash_with_staff ? rl(T("نقد عند الموظفين"), s.cash_with_staff) : ''}
       ${rl(T("إجمالي النقد باليد (بلا العهدة)"), r2(s.counted_cash + s.cash_with_staff - s.opening_float), { cls: 'total' })}` : ''}`}</div>`).join('')
     : `<p class="muted">${T("لا توجد شفتات لهذا اليوم")}</p>`;
@@ -1169,7 +1377,7 @@ async function dailyReport(box) {
         ${rl(T("صافي حركة اليوم"), m.net_movement, { cls: 'total' })}
         ${rl(T("رصيد الشركة نهاية اليوم"), d.end_balance, { cls: 'hl' })}
         ${rl(T("آجله منها (لدى التطبيقات)"), d.receivables.total, { cls: 'hl' })}`)}
-      ${repCard('cash', T("النقد — جرد الدرج"), drawer, { extra: d.shifts.some(s => s.counted_at) ? diffBadge(r2(cashRes)) : '' })}
+      ${repCard('cash', S.meta.business.cash_count ? T("النقد — جرد الدرج") : T("النقد"), drawer, { extra: d.shifts.some(s => s.counted_at) ? diffBadge(r2(cashRes)) : '' })}
       ${repCard('landmark', T("الديون — لمن وكم"), `${debtsTable(d.debts_day, T("بداية اليوم"))}
         <div style="margin-top:10px">${rl(T("تغطية رصيد الشركة للديون"), d.coverage === null ? '—' : `<span class="prog-cell"><span class="progress"><i style="width:${Math.min(100, d.coverage || 0)}%"></i></span>${d.coverage}%</span>`)}
         ${rl(T("صافي المركز"), d.net_position, { cls: d.net_position < 0 ? 'bad' : 'hl' })}</div>`)}
@@ -1192,8 +1400,8 @@ function barChart(days) {
   const every = Math.ceil(n / 12);
   days.forEach((x, i) => {
     const cx = xOf(i), o = x.purchases + x.expenses;
-    g += `<rect class="bs" x="${cx - bw - 1}" y="${y(x.sales)}" width="${bw}" height="${Math.max(0, P.t + ih - y(x.sales))}" rx="2"><title>${x.date} — ${money(x.sales)}</title></rect>`;
-    g += `<rect class="bo" x="${cx + 1}" y="${y(o)}" width="${bw}" height="${Math.max(0, P.t + ih - y(o))}" rx="2"><title>${x.date} — ${money(o)}</title></rect>`;
+    g += `<rect class="bs" x="${cx - bw - 1}" y="${y(x.sales)}" width="${bw}" height="${Math.max(0, P.t + ih - y(x.sales))}" rx="2"><title>${fmtDate(x.date)} — ${money(x.sales)}</title></rect>`;
+    g += `<rect class="bo" x="${cx + 1}" y="${y(o)}" width="${bw}" height="${Math.max(0, P.t + ih - y(o))}" rx="2"><title>${fmtDate(x.date)} — ${money(o)}</title></rect>`;
     if (i % every === 0) g += `<text x="${cx}" y="${H - 8}" text-anchor="middle">${x.date.slice(8)}/${x.date.slice(5, 7)}</text>`;
   });
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${g}</svg>
@@ -1212,6 +1420,7 @@ async function periodReport(box) {
   $('#fP', box).onchange = () => { Object.assign(st, formObj($('#fP', box))); go(); };
   $$('[data-r]', box).forEach(b => b.onclick = () => { [st.from, st.to] = b.dataset.r.split('|'); go(); });
   const d = await bapi('/reports/period?' + new URLSearchParams(st));
+  const cc = !!S.meta.business.cash_count;
   const m = d.movement;
   const cats = (type) => { const l = d.byCategory.filter(c => c.type === type); const mx = Math.max(1, ...l.map(c => c.amount)); const tot = l.reduce((a, c) => a + c.amount, 0);
     return l.length ? `<table><tbody>${l.map(c => `<tr><td>${esc(T(c.name))}</td><td style="width:38%"><div class="hbar"><i style="width:${c.amount / mx * 100}%"></i></div></td><td class="n">${money(c.amount)}</td><td class="small muted">${tot ? Math.round(c.amount / tot * 100) : 0}%</td></tr>`).join('')}</tbody></table>` : `<p class="muted">${T("لا يوجد")}</p>`; };
@@ -1236,12 +1445,15 @@ async function periodReport(box) {
       ${repCard('cart', T("المشتريات حسب التصنيف"), cats('purchase'))}
       ${repCard('fileText', T("المصروفات حسب التصنيف"), cats('expense'))}
       ${repCard('store', T("أكبر الموردين"), d.bySupplier.length ? `<table><tbody>${d.bySupplier.map(s => `<tr><td>${esc(T(s.name))}</td><td class="small muted">${s.n} ${T("فاتورة")}</td><td class="n">${money(s.amount)}</td></tr>`).join('')}</tbody></table>` : `<p class="muted">${T("لا يوجد")}</p>`)}
-      ${repCard('users', T("فروقات الجرد حسب الكاشير"), `<div class="row small" style="margin:8px 0"><span class="badge neg">${T("إجمالي العجز")} ${money(-m.shortage)}</span><span class="badge warn">${T("إجمالي الفائض")} ${money(m.surplus)}</span></div>
+      ${repCard('cash', T("النقد"), `${rl(T("كاش المبيعات") + ' +', m.sales.cash, { cls: 'plus' })}${rl(T("مدفوع كاش من الدرج") + ' −', m.cash_out, { cls: 'minus' })}
+        ${rl(T("صافي النقد"), m.cash_net, { cls: 'total', note: T("الكاش المسلَّم في الفترة (بلا العهدة الثابتة)") })}
+        ${m.card_paid ? rl(T("مشتريات دُفعت شبكة"), m.card_paid, { cls: 'muted-row', note: T("لم تخرج من الدرج") }) : ''}`)}
+      ${!cc ? '' : repCard('users', T("فروقات الجرد حسب الكاشير"), `<div class="row small" style="margin:8px 0"><span class="badge neg">${T("إجمالي العجز")} ${money(-m.shortage)}</span><span class="badge warn">${T("إجمالي الفائض")} ${money(m.surplus)}</span></div>
         ${d.byCashier.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("الكاشير")}</th><th>${T("شفتات")}</th><th>${T("مطابق")}</th><th>${T("لم يُستلم")}</th><th>${T("الصافي")}</th></tr></thead><tbody>${d.byCashier.map(c => `<tr><td>${esc(c.name || '—')}</td><td>${c.shifts}</td><td>${c.exact}</td><td>${c.pending || ''}</td><td>${diffBadge(c.diff)}</td></tr>`).join('')}</tbody></table></div>` : `<p class="muted">${T("لا يوجد")}</p>`}`)}
       ${repCard('landmark', T("الديون — لمن وكم"), debtsTable(d.debts, T("بداية الفترة")), { cls: 'full' })}
-      ${repCard('calendar', T("التفصيل اليومي"), d.days.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("اليوم")}</th><th>${T("نقدي")}</th><th>${T("بطاقة")}</th><th>${T("تطبيقات")}</th><th>${T("المبيعات")}</th><th>${T("الطلبات")}</th><th>${T("المشتريات")}</th><th>${T("المصروفات")}</th><th>${T("النتيجة")}</th><th>${T("الجرد")}</th></tr></thead><tbody>
-        ${d.days.map(x => `<tr class="click" data-day="${x.date}"><td style="white-space:nowrap">${fmtDate(x.date)}</td><td class="n">${money(x.cash)}</td><td class="n">${money(x.card)}</td><td class="n">${money(x.apps)}</td><td class="n"><b>${money(x.sales)}</b></td><td>${x.orders}</td><td class="n">${money(x.purchases)}</td><td class="n">${money(x.expenses)}</td><td class="n ${x.result < 0 ? 'neg-t' : ''}">${money(x.result)}</td><td>${diffBadge(x.diff)}</td></tr>`).join('')}
-        </tbody><tfoot><tr><td>${T("الإجمالي")}</td><td class="n">${money(m.sales.cash)}</td><td class="n">${money(m.sales.card)}</td><td class="n">${money(m.sales.apps)}</td><td class="n">${money(m.sales.total)}</td><td>${m.sales.orders}</td><td class="n">${money(m.purchases_paid + m.purchases_credit)}</td><td class="n">${money(m.expenses_paid + m.expenses_credit)}</td><td class="n">${money(m.operating_result)}</td><td>${diffBadge(m.cash_diff)}</td></tr></tfoot></table></div>
+      ${repCard('calendar', T("التفصيل اليومي"), d.days.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("اليوم")}</th><th>${T("نقدي")}</th><th>${T("بطاقة")}</th><th>${T("تطبيقات")}</th><th>${T("المبيعات")}</th><th>${T("الطلبات")}</th><th>${T("المشتريات")}</th><th>${T("المصروفات")}</th><th>${T("النتيجة")}</th><th>${cc ? T("الجرد") : T("صافي النقد")}</th></tr></thead><tbody>
+        ${d.days.map(x => `<tr class="click" data-day="${x.date}"><td style="white-space:nowrap">${fmtDate(x.date)}</td><td class="n">${money(x.cash)}</td><td class="n">${money(x.card)}</td><td class="n">${money(x.apps)}</td><td class="n"><b>${money(x.sales)}</b></td><td>${x.orders}</td><td class="n">${money(x.purchases)}</td><td class="n">${money(x.expenses)}</td><td class="n ${x.result < 0 ? 'neg-t' : ''}">${money(x.result)}</td><td${cc ? '' : ' class="n"'}>${cc ? diffBadge(x.diff) : money(x.cash_net)}</td></tr>`).join('')}
+        </tbody><tfoot><tr><td>${T("الإجمالي")}</td><td class="n">${money(m.sales.cash)}</td><td class="n">${money(m.sales.card)}</td><td class="n">${money(m.sales.apps)}</td><td class="n">${money(m.sales.total)}</td><td>${m.sales.orders}</td><td class="n">${money(m.purchases_paid + m.purchases_credit)}</td><td class="n">${money(m.expenses_paid + m.expenses_credit)}</td><td class="n">${money(m.operating_result)}</td><td${cc ? '' : ' class="n"'}>${cc ? diffBadge(m.cash_diff) : money(m.cash_net)}</td></tr></tfoot></table></div>
         <p class="muted small no-print">${T("اضغط على أي يوم لفتح تقريره اليومي")}.</p>` : `<p class="muted">${T("لا توجد بيانات")}</p>`, { cls: 'full' })}
     </div></div>`;
   $$('[data-day]', box).forEach(r => r.onclick = () => { dailyReport.date = r.dataset.day; location.hash = '#/reports/daily'; });
@@ -1336,7 +1548,7 @@ async function creditorMovements(c, after) {
   const m = modal(`${T(c.name)} — ${T("حركات الدين")}`, `
     <div class="summary-box"><div class="r"><span>${T("الدين الافتتاحي")}</span>${M(c.opening_balance)}</div><div class="r t"><span>${T("المتبقي الآن")}</span>${M(c.balance)}</div></div>
     ${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("التاريخ")}</th><th>${T("النوع")}</th><th>${T("البيان")}</th><th>${T("على الدين")}</th><th></th></tr></thead><tbody>
-    ${rows.map(t => `<tr><td class="small num">${t.date}</td><td>${esc(S.me.txTypes[t.type])}</td><td class="small">${esc(t.supplier || t.description || '')}${itemsHTML(t.items)}</td>
+    ${rows.map(t => `<tr><td class="small" style="white-space:nowrap">${dayName(t.date)}<br>${t.date}</td><td>${esc(S.me.txTypes[t.type])}</td><td class="small">${esc(t.supplier || t.description || '')}${itemsHTML(t.items)}</td>
       <td class="n ${effect(t) < 0 ? 'pos-t' : 'neg-t'}">${effect(t) > 0 ? '+' : ''}${money(effect(t))}</td>
       <td class="row-acts">${can('tx_edit') ? `<button class="icon-btn" data-ed="${t.id}" title="${T("تعديل")}">${icon('edit')}</button><button class="icon-btn danger" data-del="${t.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}
     </tbody></table></div>` : `<p class="muted">${T("لا توجد حركات — الدين كله افتتاحي (يُعدّل من «تعديل» في إعدادات الدائنين)")}.</p>`}`, { wide: true });
@@ -1454,7 +1666,9 @@ VIEWS.settings = async (el) => {
     ${b.opening_balance !== undefined ? `<label>${T("رصيد الشركة الافتتاحي")}<input name="opening_balance" type="number" step="0.01" value="${b.opening_balance}"></label>` : ''}
     <label>${T("وقت الافتتاح")}<input name="open_time" type="time" step="900" value="${b.open_time || ''}"></label>
     <label>${T("وقت الإغلاق")}<input name="close_time" type="time" step="900" value="${b.close_time || ''}"></label>
-    <label class="check full"><input type="checkbox" name="cashier_counts" ${b.cashier_counts ? 'checked' : ''}> ${T("الكاشير يعدّ النقد في الدرج عند الإقفال (إن لم تُفعّلها: المحاسب أو المالك يستلم النقد ويسجّله من «سجل الإقفالات»)")}</label>
+    <label class="check full"><input type="checkbox" name="cash_count" ${b.cash_count ? 'checked' : ''}> ${T("مطابقة النقد بعدّ الدرج (عجز / زيادة)")}</label>
+    <p class="hint full" style="margin-top:-6px">${icon('info')}<span>${T("بدون المطابقة: إجمالي النقد = العهدة الثابتة + كاش مبيعات اليوم − ما دُفع كاش من الدرج، ولا تظهر خانة «النقد الموجود في الدرج» ولا عجز أو زيادة")}.</span></p>
+    <label class="check full" id="ccWrap" ${b.cash_count ? '' : 'style="display:none"'}><input type="checkbox" name="cashier_counts" ${b.cashier_counts ? 'checked' : ''}> ${T("الكاشير يعدّ النقد في الدرج عند الإقفال (إن لم تُفعّلها: المحاسب أو المالك يستلم النقد ويسجّله من «سجل الإقفالات»)")}</label>
     <div style="align-self:end"><button class="btn primary">${T("حفظ")}</button></div></form>
     <p class="hint" id="dayHint"></p>
     <p class="hint">${T("الرصيد الافتتاحي")} = ${T("رصيد الشركة يوم بدء استخدام النظام (بدون الآجل لدى التطبيقات، فهو يُدخل لكل تطبيق على حدة)")}.</p></section>
@@ -1476,11 +1690,12 @@ VIEWS.settings = async (el) => {
   const dayHint = () => {
     const o = fs_.open_time.value, c = fs_.close_time.value;
     $('#dayHint').innerHTML = o && c && o !== c
-      ? `${icon('clock')}<span>${T("يوم العمل من")} <b>${timeLabel(o)}</b> ${T("إلى")} <b>${timeLabel(c)}</b>. ${T("كل ما يُسجّل حتى الساعة")} <b>${minLabel(cutoffOf(o, c))}</b> ${T("يُحسب على يوم الافتتاح السابق (حتى لو تأخر الإقفال)، وما بعدها يُحسب على اليوم الجديد")}.</span>`
+      ? `${icon('clock')}<span>${T("يوم العمل من")} <b>${timeLabel(o)}</b> ${T("إلى")} <b>${timeLabel(c)}</b>. ${T("دوام اليوم ينتهي الساعة")} <b>${minLabel(cutoffOf(o, c))}</b> ${T("وبعدها مباشرة يبدأ اليوم التالي. إذا تأخر الكاشير في الإقفال قليلاً يُحسب إقفاله على يومه")}.</span>`
       : `${icon('clock')}<span>${T("حدّد وقت الافتتاح ووقت الإغلاق ليحسب النظام يوم العمل بدقة في الإقفال والمشتريات والتقارير")}. ${T("حالياً يبدأ اليوم الجديد الساعة")} ${minLabel((b.day_start_hour || 0) * 60)}.</span>`;
   };
   fs_.addEventListener('input', dayHint); dayHint();
-  $('#fSet').onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => { await bapi('/settings', { method: 'PUT', body: { ...formObj(e.target), cashier_counts: e.target.cashier_counts.checked ? 1 : 0 } }); toast(T("تم الحفظ"), 'ok'); await refreshBusinesses(); reload(); }); };
+  $('#fSet').cash_count.onchange = (e) => { $('#ccWrap').style.display = e.target.checked ? '' : 'none'; };
+  $('#fSet').onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => { await bapi('/settings', { method: 'PUT', body: { ...formObj(e.target), cashier_counts: e.target.cashier_counts.checked ? 1 : 0, cash_count: e.target.cash_count.checked ? 1 : 0 } }); toast(T("تم الحفظ"), 'ok'); await refreshBusinesses(); reload(); }); };
   $$('[data-add]', el).forEach(btn => btn.onclick = () => {
     const [key, kind] = btn.dataset.add.split(':');
     listItemModal(key, null, reload, kind ? { kind } : {});
@@ -1505,7 +1720,7 @@ VIEWS.settings = async (el) => {
 // "16:30" → "4:30 م"
 const timeLabel = (s) => { if (!s) return ''; let [h, m] = s.split(':').map(Number); const pm = h >= 12; h = h % 12 || 12; return `${h}:${String(m).padStart(2, '0')} ${pm ? T("م") : T("ص")}`; };
 const minsOf = (s) => +s.slice(0, 2) * 60 + +s.slice(3, 5);
-const cutoffOf = (o, c) => { const gap = (minsOf(o) - minsOf(c) + 1440) % 1440; return (minsOf(c) + Math.floor(gap / 2)) % 1440; };
+const cutoffOf = (o, c) => minsOf(c); // the new work day begins right at the closing time
 const minLabel = (m) => timeLabel(`${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`);
 
 /* ═════════════════════════ admin ═════════════════════════ */
@@ -1515,6 +1730,8 @@ const PRESETS = {
   'محاسب — عرض وتعديل': ['purchases_add', 'tx_view_all', 'tx_edit', 'shift_reopen', 'finance_manage', 'reports_view', 'balance_view', 'audit_view', 'shift_view_expected'],
   'مدير النشاط': null,
 };
+const FUND_PRESETS = { 'عضو': [], 'محصّل': ['fund_collect'], 'مشرف الصندوق': null };
+const presetsFor = (kind) => kind === 'fund' ? FUND_PRESETS : PRESETS;
 VIEWS.admin = async (el, [tab = 'users']) => {
   el.innerHTML = `<div class="page-head"><div class="ph-ic">${icon('users')}</div><div class="ph-t"><h1>${T("المستخدمون والأنشطة")}</h1></div>
     <div class="acts"><div class="seg" style="margin:0">${[['users', T("المستخدمون")], ['biz', T("الأنشطة")], ['audit', T("سجل العمليات")]].map(([k, l]) => `<label><input type="radio" name="at" value="${k}" ${tab === k ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div>
@@ -1528,10 +1745,11 @@ VIEWS.admin = async (el, [tab = 'users']) => {
 async function adminUsers(box) {
   const [users, bizs] = await Promise.all([api('/admin/users'), api('/admin/businesses')]);
   const bname = (id) => bizs.find(b => b.id === id)?.name || '';
+  const bkind = (id) => bizs.find(b => b.id === id)?.kind;
   box.innerHTML = `<section class="card"><div class="card-head"><h3>${icon('users')}${T("المستخدمون")}</h3><button class="btn primary" id="bAdd">${icon('plus')}${T("مستخدم جديد")}</button></div>
     <div class="tbl-wrap"><table><thead><tr><th>${T("الاسم")}</th><th>${T("اسم الدخول")}</th><th>${T("الدور")}</th><th>${T("الأنشطة")}</th><th>${T("الحالة")}</th><th></th></tr></thead><tbody>
-    ${users.map(u => `<tr><td>${esc(T(u.name))}</td><td class="num">${esc(u.username)}</td><td>${u.is_admin ? ("<span class=\"badge info\">" + T("مالك النظام") + "</span>") : [...new Set(u.access.map(a => roleName(false, a.permissions)))].join(' / ') || T("مستخدم")}</td>
-      <td class="small">${u.is_admin ? T("كل الأنشطة") : u.access.map(a => `${esc(T(bname(a.business_id)))} <span class="muted">(${roleName(false, a.permissions)})</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
+    ${users.map(u => `<tr><td>${esc(T(u.name))}</td><td class="num">${esc(u.username)}</td><td>${u.is_admin ? ("<span class=\"badge info\">" + T("مالك النظام") + "</span>") : [...new Set(u.access.map(a => roleName(false, a.permissions, bkind(a.business_id))))].join(' / ') || T("مستخدم")}</td>
+      <td class="small">${u.is_admin ? T("كل الأنشطة") : u.access.map(a => `${esc(T(bname(a.business_id)))} <span class="muted">(${roleName(false, a.permissions, bkind(a.business_id))})</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
       <td>${u.active ? ("<span class=\"badge pos\">" + T("فعّال") + "</span>") : ("<span class=\"badge muted\">" + T("موقوف") + "</span>")}</td><td><button class="btn sm" data-u="${u.id}">${T("تعديل")}</button></td></tr>`).join('')}
     </tbody></table></div></section>`;
   const reload = () => adminUsers(box);
@@ -1554,8 +1772,8 @@ function userModal(u, bizs, after) {
     <div id="permBox"><h4 style="margin:6px 0 10px">${T("الأنشطة والصلاحيات")}</h4>
     ${bizs.map(b => { const a = acc(b.id); return `<div class="perm-biz ${a ? '' : 'off'}" data-b="${b.id}">
       <div class="ph"><label class="check"><input type="checkbox" data-on ${a ? 'checked' : ''}> <b>${esc(T(b.name))}</b></label>
-        <span class="row presets">${Object.keys(PRESETS).map(p => `<button type="button" class="btn sm" data-preset="${p}">${T(p)}</button>`).join('')}</span></div>
-      <div class="pl">${Object.entries(P).map(([k, l]) => `<label class="check small"><input type="checkbox" data-p="${k}" ${a?.permissions.includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>`; }).join('')}</div>
+        ${b.kind === 'fund' ? `<span class="badge info">${T("صندوق عائلي")}</span>` : ''}<span class="row presets">${Object.keys(presetsFor(b.kind)).map(p => `<button type="button" class="btn sm" data-preset="${p}">${T(p)}</button>`).join('')}</span></div>
+      <div class="pl">${Object.entries(P).filter(([k]) => permsFor(b.kind).includes(k)).map(([k, l]) => `<label class="check small"><input type="checkbox" data-p="${k}" ${a?.permissions.includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>`; }).join('')}</div>
     <div class="mf"><button class="btn primary">${T("حفظ")}</button></div></form>`, { wide: true });
   const f = $('#fU', m.el);
   const isOwner = () => f.querySelector('[name=role]:checked').value === 'owner';
@@ -1563,7 +1781,8 @@ function userModal(u, bizs, after) {
   $$('[name=role]', f).forEach(r => r.onchange = syncAdmin); syncAdmin();
   $$('[data-on]', f).forEach(c => c.onchange = () => c.closest('.perm-biz').classList.toggle('off', !c.checked));
   $$('[data-preset]', f).forEach(b => b.onclick = () => {
-    const ps = PRESETS[b.dataset.preset] || Object.keys(P);
+    const kind = bizs.find(x => x.id == b.closest('.perm-biz').dataset.b)?.kind;
+    const ps = presetsFor(kind)[b.dataset.preset] || permsFor(kind);
     $$('[data-p]', b.closest('.perm-biz')).forEach(c => c.checked = ps.includes(c.dataset.p));
   });
   f.onsubmit = (e) => {
@@ -1610,26 +1829,48 @@ async function adminBiz(box) {
   box.innerHTML = `<section class="card"><div class="card-head"><h3>${icon('building')}${T("الأنشطة التجارية")}</h3><button class="btn primary" id="bAdd">${icon('plus')}${T("نشاط جديد")}</button></div>
     <p class="hint">${T("كل نشاط منفصل تماماً: له رصيده وشفتاته وحركاته وتطبيقاته ودائنوه الخاصة")}.</p>
     <div class="tbl-wrap"><table><thead><tr><th>${T("النشاط")}</th><th>${T("رسوم البطاقة")}</th><th>${T("العهدة")}</th><th>${T("الرصيد الافتتاحي")}</th><th>${T("الحالة")}</th><th></th></tr></thead><tbody>
-    ${bizs.map(b => `<tr><td class="row" style="flex-wrap:nowrap">${logoImg(b, 't-logo')}<b>${esc(T(b.name))}</b></td><td>${b.card_fee_pct}%</td><td class="n">${money(b.cash_float)}</td><td class="n">${money(b.opening_balance)}</td>
-      <td>${b.active ? ("<span class=\"badge pos\">" + T("فعّال") + "</span>") : ("<span class=\"badge muted\">" + T("موقوف") + "</span>")}</td><td class="row-acts"><button class="btn sm" data-b="${b.id}">${icon('edit')}${T("تعديل")}</button><button class="btn sm danger" data-reset="${b.id}">${icon('undo')}${T("تصفير البيانات")}</button></td></tr>`).join('')}
+    ${bizs.map(b => `<tr><td class="row" style="flex-wrap:nowrap">${logoImg(b, 't-logo')}<b>${esc(T(b.name))}</b>${b.kind === 'fund' ? `<span class="badge info">${T("صندوق عائلي")}</span>` : ''}</td>${b.kind === 'fund' ? '<td>—</td><td>—</td><td>—</td>' : `<td>${b.card_fee_pct}%</td><td class="n">${money(b.cash_float)}</td><td class="n">${money(b.opening_balance)}</td>`}
+      <td>${b.active ? ("<span class=\"badge pos\">" + T("فعّال") + "</span>") : ("<span class=\"badge muted\">" + T("موقوف") + "</span>")}</td><td class="row-acts">${b.active ? `<button class="btn sm primary" data-go="${b.id}">${icon('store')}${T("اذهب للنشاط")}</button>` : ''}<button class="btn sm" data-b="${b.id}">${icon('edit')}${T("تعديل")}</button><button class="btn sm danger" data-reset="${b.id}">${icon('undo')}${T("تصفير البيانات")}</button></td></tr>`).join('')}
     </tbody></table></div></section>`;
+  // open that business: switch to it and land on its settings page (fund → fund settings)
+  $$('[data-go]', box).forEach(x => x.onclick = async () => {
+    try {
+      const b = bizs.find(y => y.id == x.dataset.go);
+      S.bid = b.id; localStorage.setItem('bid', S.bid);
+      await loadMeta(); renderShell();
+      location.hash = b.kind === 'fund' ? '#/fsettings' : '#/settings';
+      route();
+    } catch (e) { fail(e); }
+  });
   $$('[data-reset]', box).forEach(x => x.onclick = () => resetBusiness(bizs.find(b => b.id == x.dataset.reset), () => adminBiz(box)));
   const edit = (b) => {
     const m = modal(b ? T("تعديل نشاط") : T("نشاط جديد"), `<form>
       <label>${T("اسم النشاط")}<input name="name" required value="${esc(b?.name || '')}"></label>
-      <div class="fgrid"><label>${T("رسوم البطاقة %")}<input name="card_fee_pct" type="number" step="0.01" min="0" value="${b?.card_fee_pct ?? 0.92}"></label>
+      ${b ? '' : `<label style="margin-top:10px">${T("نوع النشاط")}<select name="kind"><option value="restaurant">${T("مطعم / نشاط تجاري (الإقفال اليومي)")}</option><option value="fund">${T("صندوق عائلي (اشتراكات شهرية وقروض)")}</option></select></label>`}
+      <div class="fgrid" id="rFields" ${b?.kind === 'fund' ? 'hidden' : ''}><label>${T("رسوم البطاقة %")}<input name="card_fee_pct" type="number" step="0.01" min="0" value="${b?.card_fee_pct ?? 0.92}"></label>
       <label>${T("العهدة الثابتة")}<input name="cash_float" type="number" step="0.01" min="0" value="${b?.cash_float ?? 200}"></label>
       <label>${T("الرصيد الافتتاحي")}<input name="opening_balance" type="number" step="0.01" value="${b?.opening_balance ?? 0}"></label></div>
       ${b ? `<label class="check" style="margin-top:12px"><input type="checkbox" name="active" ${b.active ? 'checked' : ''}> ${T("النشاط فعّال")}</label>` : ("<p class=\"hint\">" + T("سيتم إنشاء تصنيفات وتطبيقات توصيل افتراضية يمكنك تعديلها لاحقاً") + ".</p>")}
       <div class="mf"><button class="btn primary">${T("حفظ")}</button></div></form>`);
+    const kindSel = $('[name=kind]', m.el);
+    if (kindSel) kindSel.onchange = () => { $('#rFields', m.el).hidden = kindSel.value === 'fund'; const h = $('.hint', m.el); if (h) h.textContent = kindSel.value === 'fund' ? T("سيتم إنشاء فئتي اشتراك: موظف 50 وغير موظف 10، ويمكنك تعديلهما من إعدادات الصندوق") + '.' : T("سيتم إنشاء تصنيفات وتطبيقات توصيل افتراضية يمكنك تعديلها لاحقاً") + '.'; };
     $('form', m.el).onsubmit = (e) => {
       e.preventDefault();
       busy(e.submitter, async () => {
         const body = formObj(e.target);
+        let created = null;
         if (b) { body.active = e.target.active.checked; await api('/admin/businesses/' + b.id, { method: 'PUT', body }); }
-        else await api('/admin/businesses', { method: 'POST', body });
+        else created = await api('/admin/businesses', { method: 'POST', body });
         m.close(); toast(T("تم الحفظ"), 'ok');
-        S.me = await api('/me'); if (!S.bid && S.me.businesses[0]) { S.bid = S.me.businesses[0].id; await loadMeta(); }
+        S.me = await api('/me');
+        // a new business opens right away (its own menu and settings), instead of staying on the current one
+        if (created && S.me.businesses.some(x => x.id === created.id)) {
+          S.bid = created.id; localStorage.setItem('bid', S.bid); await loadMeta(); renderShell();
+          location.hash = body.kind === 'fund' ? '#/fsettings' : '#/settings'; route();
+          toast(T("تم إنشاء النشاط والانتقال إليه — يمكنك التبديل بين الأنشطة من القائمة أعلى الشريط الجانبي"), 'ok');
+          return;
+        }
+        if (!S.bid && S.me.businesses[0]) { S.bid = S.me.businesses[0].id; await loadMeta(); }
         renderShell(); route();
       });
     };

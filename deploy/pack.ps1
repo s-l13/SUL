@@ -6,7 +6,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $out = Join-Path $root 'daily-closing.tar.gz'
 $stage = Join-Path $env:TEMP ('dc-pack-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage | Out-Null
-$items = 'server.js', 'db.js', 'package.json', 'package-lock.json', 'public', 'deploy', 'scripts', 'README.md', 'DEPLOY.md', 'DEPLOY-RENDER.md'
+$items = 'server.js', 'db.js', 'fund.js', 'package.json', 'package-lock.json', 'public', 'deploy', 'scripts', 'README.md', 'DEPLOY.md', 'DEPLOY-RENDER.md'
 foreach ($i in $items) { $p = Join-Path $root $i; if (Test-Path $p) { Copy-Item $p -Destination $stage -Recurse } }
 if ($WithData) {
   # a consistent copy even while the app is running (SQLite online backup)

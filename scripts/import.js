@@ -55,7 +55,7 @@ function readSource(file) {
       console.log(`${t.padEnd(16)} ${rows.length}`);
     }
     // PostgreSQL: continue new ids after the highest copied id
-    const NO_ID = ['user_business', 'sessions', 'shift_app_sales'];
+    const NO_ID = ['user_business', 'sessions', 'shift_app_sales', 'fund_settings'];
     if (db.dialect === 'pg') for (const t of TABLES.filter(x => !NO_ID.includes(x)))
       await db.run(`SELECT setval(pg_get_serial_sequence('${t}', 'id'), (SELECT COALESCE(MAX(id), 0) + 1 FROM ${t}), false)`);
   });

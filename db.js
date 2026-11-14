@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS businesses (
   id ${ID}, name TEXT NOT NULL,
   card_fee_pct ${REAL} NOT NULL DEFAULT 0, cash_float ${REAL} NOT NULL DEFAULT 0, opening_balance ${REAL} NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT ${NOW},
-  cashier_counts INTEGER NOT NULL DEFAULT 0, day_start_hour INTEGER NOT NULL DEFAULT 5, open_time TEXT, close_time TEXT,
+  cashier_counts INTEGER NOT NULL DEFAULT 0, cash_count INTEGER NOT NULL DEFAULT 0, day_start_hour INTEGER NOT NULL DEFAULT 5, open_time TEXT, close_time TEXT, kind TEXT NOT NULL DEFAULT 'restaurant',
   logo TEXT, logo_updated TEXT, theme TEXT
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS shift_app_sales (
 CREATE TABLE IF NOT EXISTS transactions (
   id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), shift_id INTEGER REFERENCES shifts(id),
   date TEXT NOT NULL, type TEXT NOT NULL, payment_method TEXT NOT NULL DEFAULT 'company',
-  amount ${REAL} NOT NULL, fee ${REAL} NOT NULL DEFAULT 0,
+  amount ${REAL} NOT NULL, fee ${REAL} NOT NULL DEFAULT 0, card_part ${REAL} NOT NULL DEFAULT 0,
   category_id INTEGER REFERENCES categories(id), creditor_id INTEGER REFERENCES creditors(id), app_id INTEGER REFERENCES delivery_apps(id),
   supplier TEXT, invoice_no TEXT, description TEXT,
   created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL DEFAULT ${NOW},
@@ -172,11 +172,79 @@ CREATE TABLE IF NOT EXISTS audit_log (
   id ${ID}, business_id INTEGER, user_id INTEGER, action TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL DEFAULT ${NOW}
 );
 CREATE INDEX IF NOT EXISTS ix_audit_biz ON audit_log(business_id, created_at);
+-- ── family fund (a business of kind 'fund') ──
+CREATE TABLE IF NOT EXISTS fund_settings (
+  business_id INTEGER PRIMARY KEY REFERENCES businesses(id), start_month TEXT NOT NULL, due_day INTEGER NOT NULL DEFAULT 27,
+  loan_multiplier ${REAL} NOT NULL DEFAULT 2, opening_balance ${REAL} NOT NULL DEFAULT 0,
+  show_names INTEGER NOT NULL DEFAULT 0, show_borrowers INTEGER NOT NULL DEFAULT 0, motto TEXT, statement_month TEXT
+);
+CREATE TABLE IF NOT EXISTS fund_categories (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), name TEXT NOT NULL, amount ${REAL} NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS fund_members (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), name TEXT NOT NULL, parent_id INTEGER,
+  user_id INTEGER REFERENCES users(id), category_id INTEGER REFERENCES fund_categories(id), contributing INTEGER NOT NULL DEFAULT 1,
+  join_month TEXT, left_month TEXT, guardian_access INTEGER NOT NULL DEFAULT 1, notes TEXT, deceased INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT ${NOW}, deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_fmem_biz ON fund_members(business_id);
+CREATE TABLE IF NOT EXISTS fund_rates (
+  id ${ID}, member_id INTEGER NOT NULL REFERENCES fund_members(id), from_month TEXT NOT NULL, amount ${REAL} NOT NULL, created_at TEXT NOT NULL DEFAULT ${NOW}
+);
+CREATE INDEX IF NOT EXISTS ix_frate_mem ON fund_rates(member_id);
+CREATE TABLE IF NOT EXISTS fund_loans (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), member_id INTEGER NOT NULL REFERENCES fund_members(id),
+  amount ${REAL} NOT NULL, installment ${REAL} NOT NULL, start_month TEXT NOT NULL, issued_date TEXT NOT NULL,
+  anonymous INTEGER NOT NULL DEFAULT 0, note TEXT, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL DEFAULT ${NOW}, deleted_at TEXT
+);
+CREATE TABLE IF NOT EXISTS fund_payments (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), member_id INTEGER NOT NULL REFERENCES fund_members(id),
+  month TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('dues','installment')), loan_id INTEGER REFERENCES fund_loans(id),
+  amount ${REAL} NOT NULL, note TEXT, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL DEFAULT ${NOW},
+  deleted_at TEXT, deleted_by INTEGER REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS ix_fpay_biz ON fund_payments(business_id, month);
+CREATE TABLE IF NOT EXISTS fund_loan_requests (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), member_id INTEGER NOT NULL REFERENCES fund_members(id),
+  requested_by INTEGER REFERENCES users(id), amount ${REAL} NOT NULL, months INTEGER NOT NULL, reason TEXT, anonymous INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+  over_limit INTEGER NOT NULL DEFAULT 0, flagged INTEGER NOT NULL DEFAULT 0,
+  decided_by INTEGER REFERENCES users(id), decided_at TEXT, decision_note TEXT, loan_id INTEGER REFERENCES fund_loans(id),
+  created_at TEXT NOT NULL DEFAULT ${NOW}
+);
+CREATE INDEX IF NOT EXISTS ix_freq_biz ON fund_loan_requests(business_id, status);
+-- a member asks to see the fund report with everyone's names; the supervisor grants it for some days
+CREATE TABLE IF NOT EXISTS fund_report_requests (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), user_id INTEGER NOT NULL REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')), expires_on TEXT,
+  decided_by INTEGER REFERENCES users(id), decided_at TEXT, created_at TEXT NOT NULL DEFAULT ${NOW}
+);
+CREATE TABLE IF NOT EXISTS fund_banners (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), title TEXT, body TEXT, color TEXT NOT NULL DEFAULT 'brand',
+  image TEXT, active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT ${NOW}
+);
+-- goals of the fund (a campaign with gifts, or a target on the balance / total collected / number of contributors)
+CREATE TABLE IF NOT EXISTS fund_goals (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), title TEXT NOT NULL, description TEXT, kind TEXT NOT NULL DEFAULT 'campaign',
+  target ${REAL} NOT NULL DEFAULT 0, emoji TEXT, color TEXT NOT NULL DEFAULT 'sunset', deadline TEXT, active INTEGER NOT NULL DEFAULT 1,
+  sort INTEGER NOT NULL DEFAULT 0, done_at TEXT, deleted_at TEXT, created_at TEXT NOT NULL DEFAULT ${NOW}
+);
+CREATE TABLE IF NOT EXISTS fund_goal_gifts (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), goal_id INTEGER NOT NULL REFERENCES fund_goals(id), member_id INTEGER,
+  donor TEXT, amount ${REAL} NOT NULL, date TEXT NOT NULL, note TEXT, created_by INTEGER, deleted_at TEXT, created_at TEXT NOT NULL DEFAULT ${NOW}
+);
+-- in-app notifications (bell): one row per recipient
+CREATE TABLE IF NOT EXISTS notifications (
+  id ${ID}, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, business_id INTEGER, kind TEXT NOT NULL,
+  title TEXT NOT NULL, vars TEXT, link TEXT, read_at TEXT, created_at TEXT NOT NULL DEFAULT ${NOW}
+);
+CREATE INDEX IF NOT EXISTS ix_notif_user ON notifications(user_id, read_at);
 CREATE TABLE IF NOT EXISTS snapshots (
   id ${ID}, label TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT ${NOW}
 );`;
 // every table, parents before children (used by export / copy / reset)
-const TABLES = ['businesses', 'users', 'user_business', 'sessions', 'delivery_apps', 'categories', 'creditors', 'shifts', 'shift_app_sales', 'transactions', 'tx_items', 'audit_log'];
+const TABLES = ['businesses', 'users', 'user_business', 'sessions', 'delivery_apps', 'categories', 'creditors', 'shifts', 'shift_app_sales', 'transactions', 'tx_items', 'audit_log',
+  'fund_settings', 'fund_categories', 'fund_members', 'fund_rates', 'fund_loans', 'fund_payments', 'fund_loan_requests', 'fund_banners', 'fund_report_requests', 'fund_goals', 'fund_goal_gifts', 'notifications'];
 
 // SQLite files created by earlier versions: add the columns that came later
 async function migrateSqlite() {
@@ -189,12 +257,17 @@ async function migrateSqlite() {
     addCol('shifts', 'counted_by', 'INTEGER');
     addCol('shifts', 'counted_at', 'TEXT');
     addCol('businesses', 'cashier_counts', 'INTEGER NOT NULL DEFAULT 0');
+    addCol('businesses', 'cash_count', 'INTEGER NOT NULL DEFAULT 0');
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transactions'").get()) addCol('transactions', 'card_part', 'REAL NOT NULL DEFAULT 0');
     addCol('businesses', 'day_start_hour', 'INTEGER NOT NULL DEFAULT 5');
     addCol('businesses', 'logo', 'TEXT');
     addCol('businesses', 'logo_updated', 'TEXT');
     addCol('businesses', 'theme', 'TEXT');
     addCol('businesses', 'open_time', 'TEXT');
     addCol('businesses', 'close_time', 'TEXT');
+    addCol('businesses', 'kind', "TEXT NOT NULL DEFAULT 'restaurant'");
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fund_members'").get()) addCol('fund_members', 'deceased', 'INTEGER NOT NULL DEFAULT 0');
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fund_settings'").get()) { addCol('fund_settings', 'show_names', 'INTEGER NOT NULL DEFAULT 0'); addCol('fund_settings', 'show_borrowers', 'INTEGER NOT NULL DEFAULT 0'); addCol('fund_settings', 'motto', 'TEXT'); addCol('fund_settings', 'statement_month', 'TEXT'); }
     addCol('creditors', 'deleted_at', 'TEXT');
     addCol('users', 'must_change', 'INTEGER NOT NULL DEFAULT 0');
   }
@@ -215,7 +288,7 @@ async function init() {
   if (!PG) await migrateSqlite();
   await engine.exec(SCHEMA);
   // PostgreSQL databases created by earlier versions: add the columns that came later
-  if (PG) await engine.exec('ALTER TABLE businesses ADD COLUMN IF NOT EXISTS open_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS close_time TEXT;');
+  if (PG) await engine.exec('ALTER TABLE businesses ADD COLUMN IF NOT EXISTS open_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS close_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT \'restaurant\'; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS cash_count INTEGER NOT NULL DEFAULT 0; ALTER TABLE transactions ADD COLUMN IF NOT EXISTS card_part DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS deceased INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_names INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_borrowers INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS motto TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS statement_month TEXT;');
   const { c } = await engine.get('SELECT COUNT(*) c FROM users');
   if (c === 0) {
     await engine.tx(async () => {
