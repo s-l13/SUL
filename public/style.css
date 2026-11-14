@@ -900,3 +900,21 @@ tr.mine-row td { background: var(--brand-soft); }
 .fr-h { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; } .fr-h .grow { flex: 1; }
 .fr-b { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin-top: 8px; font-size: 13.5px; }
 .fr-c { display: inline-flex; align-items: center; gap: 8px; flex: 1 1 180px; } .fr-c > :last-child { flex: 1; }
+.pm-others { margin-top: 10px; } .pm-others summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+/* months paid ahead / still to come */
+.ms.ahead i, .ms-dot.ahead { background: color-mix(in srgb, var(--pos) 60%, var(--info)); }
+.ms.future i { background: var(--border); }
+.fc.ahead { background: color-mix(in srgb, var(--pos-soft) 50%, var(--info-soft)); color: var(--pos); font-weight: 600; }
+.fc.future { color: var(--muted); background: repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--border) 45%, transparent) 6px 7px); }
+/* month picker in collection */
+.cal-y { margin-bottom: 10px; } .cal-y > b { display: block; margin-bottom: 6px; }
+.cal-g { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 6px; }
+.cal-m { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 7px 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+.cal-m small { font-size: 11.5px; color: var(--muted); }
+.cal-m.ms-missed, .cal-m.ms-partial { border-color: color-mix(in srgb, var(--neg) 45%, var(--border)); }
+.cal-m.ms-open { border-color: var(--info); }
+.cal-m.paid { background: var(--pos-soft); color: var(--pos); border-color: transparent; cursor: default; opacity: .8; }
+.cal-m.on { background: var(--brand); color: var(--on-brand, #fff); border-color: var(--brand); } .cal-m.on small { color: inherit; }
+.cal-sel { display: grid; gap: 6px; margin: 10px 0; }
+.cal-row { display: grid; grid-template-columns: 1fr 120px auto; align-items: center; gap: 8px; margin: 0; }
+.m-set input { font-size: 18px; font-weight: 700; }

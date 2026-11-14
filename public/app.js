@@ -1270,7 +1270,7 @@ const F_L = {
   debt: T("الدين المتبقي"), movements: T("الحركات المحذوفة معه"), name: T("الاسم"), kind: T("النوع"), opening_receivable: T("الآجل الافتتاحي"), active: T("فعّال"),
 };
 const AUDIT_ACTIONS = {
-  fund_payment: [T("تسجيل دفعة"), 'pos'], fund_payment_delete: [T("حذف دفعة"), 'neg'], fund_member_create: [T("إضافة عضو"), 'pos'], fund_member_update: [T("تعديل عضو"), 'warn'],
+  fund_payment: [T("تسجيل دفعة"), 'pos'], fund_payment_delete: [T("حذف دفعة"), 'neg'], fund_payment_update: [T("تعديل دفعة"), 'warn'], fund_member_create: [T("إضافة عضو"), 'pos'], fund_member_update: [T("تعديل عضو"), 'warn'],
   fund_member_delete: [T("حذف عضو"), 'neg'], fund_rate: [T("تغيير الاشتراك الشهري"), 'warn'], fund_settings: [T("تعديل إعدادات الصندوق"), 'warn'],
   fund_category_create: [T("إضافة فئة اشتراك"), 'pos'], fund_category_update: [T("تعديل فئة اشتراك"), 'warn'], fund_loan_create: [T("تسجيل قرض"), 'info'],
   fund_loan_update: [T("تعديل قرض"), 'warn'], fund_loan_delete: [T("حذف قرض"), 'neg'], fund_account_create: [T("إنشاء حساب دخول لعضو"), 'pos'], fund_account_password: [T("تغيير كلمة مرور عضو"), 'warn'], fund_account_link: [T("ربط عضو بحساب موجود"), 'pos'], fund_account_unlink: [T("فك ربط حساب عضو"), 'warn'], fund_import: [T("استيراد بيانات"), 'info'],

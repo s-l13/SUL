@@ -33,10 +33,10 @@ const ratingBadge = (r) => { const [l, c, ic] = RATING[r] || RATING.new; return 
 const commitBar = (v) => v === null ? '<span class="muted small">—</span>'
   : `<div class="cbar"><div class="progress"><i style="width:${v}%;background:var(--${v >= 95 ? 'pos' : v >= 80 ? 'info' : v >= 60 ? 'warn' : 'neg'})"></i></div><b class="num">${v}%</b></div>`;
 const fk = (label, value, ic, cls = '', sub = '') => `<div class="kpi ${cls}"><div class="k-ic">${icon(ic)}</div><div class="k-b"><div class="l">${label}</div><div class="v">${value}</div>${sub ? `<div class="small muted">${sub}</div>` : ''}</div></div>`;
-const STATUS_L = { full: T("مدفوع"), late: T("مدفوع متأخراً"), partial: T("جزئي"), missed: T("لم يُدفع"), open: T("الشهر الحالي"), none: T("لا يوجد استحقاق") };
+const STATUS_L = { full: T("مدفوع"), ahead: T("مدفوع مقدّماً"), future: T("لم يحن بعد"), late: T("مدفوع متأخراً"), partial: T("جزئي"), missed: T("لم يُدفع"), open: T("الشهر الحالي"), none: T("لا يوجد استحقاق") };
 // last months of a member as small coloured squares
 const monthStrip = (months, n = 12) => `<div class="mstrip">${months.slice(-n).map(x => `<span class="ms ${x.status}" title="${monLabel(x.m)} — ${STATUS_L[x.status]}: ${money(x.covered ?? x.paid)} / ${money(x.due)}"><i></i><small>${monName(x.m).slice(0, 3)}</small></span>`).join('')}</div>`;
-const mLegend = () => `<div class="legend small">${['full', 'late', 'partial', 'missed', 'open'].map(s => `<span><i class="ms-dot ${s}"></i>${STATUS_L[s]}</span>`).join('')}</div>`;
+const mLegend = () => `<div class="legend small">${['full', 'ahead', 'late', 'partial', 'missed', 'open'].map(s => `<span><i class="ms-dot ${s}"></i>${STATUS_L[s]}</span>`).join('')}</div>`;
 
 // cumulative growth of the fund (collected, balance) + monthly income bars
 function growthChart(series) {
@@ -354,9 +354,15 @@ async function memberDetail(id) {
     <div class="sec-title">${icon('list')}<span class="grow">${T("الدفعات")}</span></div>
     ${m.payments.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("الشهر")}</th><th>${T("النوع")}</th><th>${T("المبلغ")}</th><th>${T("سجّلها")}</th><th>${T("الإيصال")}</th></tr></thead><tbody>
       ${m.payments.map(p => `<tr><td>${monLabel(p.month)}${p.for_month && p.for_month !== p.month ? `<div class="small muted">${T("عن")} ${monLabel(p.for_month)}</div>` : ''}</td><td>${p.kind !== 'dues' ? T("قسط قرض") : p.extra ? T("مساهمة إضافية") : T("اشتراك")}</td><td class="n"><b>${money(p.amount)}</b></td><td class="small muted">${esc(p.by)} · ${p.created_at.slice(0, 10)}</td>
-        <td><button class="btn sm ghost" data-go="#/receipt/${p.id}">${icon('receipt')}<span dir="ltr">R-${String(p.id).padStart(6, '0')}</span></button></td></tr>`).join('')}</tbody></table></div>` : `<p class="muted small">${T("لا توجد دفعات")}</p>`}
+        <td style="white-space:nowrap"><button class="btn sm ghost" data-go="#/receipt/${p.id}">${icon('receipt')}<span dir="ltr">R-${String(p.id).padStart(6, '0')}</span></button>${(can('fund_manage') || ((can('fund_collect')) && p.created_by === S.me.user.id)) ? `<button class="icon-btn" data-pedit="${p.id}" title="${T("تعديل")}">${icon('edit')}</button><button class="icon-btn danger" data-pdel="${p.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : `<p class="muted small">${T("لا توجد دفعات")}</p>`}
     ${m.rates.length > 1 ? `<div class="sec-title">${icon('history')}<span class="grow">${T("تغيّر الاشتراك")}</span></div><p class="small">${m.rates.map(r => `${T("من")} ${monLabel(r.from_month)}: <b>${money(r.amount)}</b>`).join(' · ')}</p>` : ''}`, { wide: true });
   $('#bStmt', md.el).onclick = () => statementCSV(m);
+  const again = () => { md.close(); memberDetail(id); if (location.hash.startsWith('#/flow')) { S.fund = null; route(); } };
+  $$('[data-pedit]', md.el).forEach(b => b.onclick = () => paymentEdit(m.payments.find(p => p.id == b.dataset.pedit), m, again));
+  $$('[data-pdel]', md.el).forEach(b => b.onclick = async () => {
+    if (!await confirmBox(T("حذف الدفعة"), `<p>${T("حذف هذه الدفعة؟ ستظهر في سجل التعديلات")}.</p>`, T("حذف"), true)) return;
+    try { await bapi('/fund/payments/' + b.dataset.pdel, { method: 'DELETE' }); toast(T("تم الحذف"), 'ok'); again(); } catch (err) { fail(err); }
+  });
   $$('[data-go]', md.el).forEach(b => b.onclick = () => { md.close(); location.hash = b.dataset.go; });
   return md;
 }
@@ -403,6 +409,8 @@ VIEWS.collect = async (el, [month]) => {
     f.addEventListener('input', drawExtra); drawExtra();
     f.addEventListener('input', drawMonths); if (box) box.addEventListener('change', drawMonths);
     $('[data-full]', f).onclick = () => { f.amount.value = f.dataset.left; f.amount.focus(); drawMonths(); };
+    const cb = $('[data-cal]', f);
+    if (cb) cb.onclick = () => { const row = d.rows.find(r => r.id === Number(mid)); monthsPicker(row, d.month, d.now, reload); };
     f.onsubmit = (e) => {
       e.preventDefault();
       const late = box && !box.hidden ? picked() : [];
@@ -420,6 +428,41 @@ VIEWS.collect = async (el, [month]) => {
     try { await bapi('/fund/payments/' + b.dataset.delpay, { method: 'DELETE' }); toast(T("تم الحذف"), 'ok'); reload(); } catch (e) { fail(e); }
   });
 };
+// the month picker: tap the months paid, each with its amount (the monthly fee, can be changed) — one receipt per month
+function monthsPicker(row, M, now, after) {
+  const x = row.dues, cal = new Map((x.cal || []).map(c => [c.m, c]));
+  const first = (x.cal || [])[0]?.m || M;
+  // from the member's first month to now, then the next 12 months
+  const months = []; for (let mo = first, i = 0; mo <= now && i < 600; mo = nextMon(mo), i++) months.push(mo);
+  for (let mo = nextMon(now), i = 0; i < 12; mo = nextMon(mo), i++) months.push(mo);
+  for (const c of x.cal || []) if (!months.includes(c.m)) months.push(c.m);
+  months.sort();
+  const info = (mo) => cal.get(mo) || { m: mo, due: x.monthly, left: x.monthly, status: mo > now ? 'future' : 'none' };
+  const years = [...new Set(months.map(mo => mo.slice(0, 4)))];
+  const md = modal(`${T("اختيار الأشهر")} — ${row.name}`, `<form autocomplete="off">
+    <p class="muted small" style="margin-top:0">${T("اضغط على الأشهر التي دفعها، وعدّل مبلغ أي شهر إن لزم. كل شهر يُسجّل بإيصال مستقل")}.</p>
+    ${years.map(y => `<div class="cal-y"><b>${y}</b><div class="cal-g">${months.filter(mo => mo.startsWith(y)).map(mo => { const c = info(mo), paid = c.left <= 0.005 && c.due > 0;
+      return `<button type="button" class="cal-m ms-${c.status} ${paid ? 'paid' : ''}" data-mo="${mo}" ${paid ? 'disabled' : ''}><span>${monName(mo)}</span><small class="num">${paid ? '✓' : money(c.left || x.monthly).replace('.00', '')}</small></button>`; }).join('')}</div></div>`).join('')}
+    <div id="calSel" class="cal-sel"></div>
+    <div class="summary-box"><div class="r t"><span>${T("المجموع")}</span><b id="calTot" class="num">0.00</b></div></div>
+    <div class="mf"><button class="btn primary" id="calOk" disabled>${icon('check')}${T("تسجيل")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`, { wide: true });
+  const sel = new Map(); // month → amount
+  const draw = () => {
+    $$('[data-mo]', md.el).forEach(b => b.classList.toggle('on', sel.has(b.dataset.mo)));
+    $('#calSel', md.el).innerHTML = [...sel.keys()].sort().map(mo => `<label class="cal-row"><span>${monLabel(mo)}${mo > now ? ` <span class="badge info">${T("مقدّم")}</span>` : ''}</span><input type="number" step="0.01" min="0.01" inputmode="decimal" data-amt="${mo}" value="${sel.get(mo)}"><button type="button" class="icon-btn" data-rm="${mo}" title="${T("إزالة")}">${icon('x')}</button></label>`).join('');
+    const tot = r2([...sel.values()].reduce((a, v) => a + (Number(v) || 0), 0));
+    $('#calTot', md.el).textContent = money(tot); $('#calOk', md.el).disabled = !sel.size || !(tot > 0);
+    $$('[data-amt]', md.el).forEach(i => i.oninput = () => { sel.set(i.dataset.amt, i.value); const t = r2([...sel.values()].reduce((a, v) => a + (Number(v) || 0), 0)); $('#calTot', md.el).textContent = money(t); $('#calOk', md.el).disabled = !(t > 0); });
+    $$('[data-rm]', md.el).forEach(b => b.onclick = () => { sel.delete(b.dataset.rm); draw(); });
+  };
+  $$('[data-mo]', md.el).forEach(b => b.onclick = () => { const mo = b.dataset.mo; if (sel.has(mo)) sel.delete(mo); else { const c = info(mo); sel.set(mo, r2(c.left > 0.005 ? c.left : x.monthly)); } draw(); });
+  draw();
+  $('form', md.el).onsubmit = (e) => { e.preventDefault(); busy($('#calOk', md.el), async () => {
+    const parts = [...sel.entries()].map(([month, amount]) => ({ month, amount: r2(amount) })).filter(q => q.amount > 0);
+    const r = await bapi('/fund/payments', { method: 'POST', body: { member_id: row.id, month: M, kind: 'dues', parts } });
+    md.close(); toast(`${T("تم تسجيل")} ${parts.length} ${T("أشهر")} ✓ — ${T("إيصال")} ${r.nos.join('، ')}`, 'ok'); after();
+  }); };
+}
 function payForm(mid, kind, loanId, label, x) {
   const left = Math.max(0, Math.round((x.required - x.paid) * 100) / 100);
   return `<div class="pay-line">
@@ -430,13 +473,14 @@ function payForm(mid, kind, loanId, label, x) {
     <form class="pay-f" data-pay="${mid}:${kind}:${loanId || ''}" data-left="${left}" autocomplete="off">
       <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" placeholder="${T("المبلغ المدفوع")}" required>
       <button type="button" class="btn sm" data-full ${left ? '' : 'disabled'}>${T("كامل")} ${left ? money(left) : ''}</button>
+      ${kind === 'dues' ? `<button type="button" class="btn sm" data-cal title="${T("اختيار الأشهر من التقويم")}">${icon('calendar')}${T("الأشهر")}</button>` : ''}
       <button class="btn sm primary">${icon('check')}${T("تسجيل")}</button>
       ${kind === 'dues' ? `<div class="pay-extra" hidden><div class="small"><b>${T("المبلغ أكبر من المطلوب بـ")} <span class="px-amt num"></span></b> — ${T("ماذا نفعل بالزيادة؟")}</div>
         <label class="check"><input type="radio" name="px${mid}" value="extra" checked> ${T("مساهمة إضافية")}</label>
         <div class="muted small" style="margin:-4px 0 2px;padding-inline-start:26px">${T("(تزيد مساهماته وأحقيته في القرض، ويبقى عليه اشتراك الشهور القادمة)")}</div>
         <label class="check"><input type="radio" name="px${mid}" value="ahead"> ${T("دفعة مقدّمة للشهور القادمة")}</label></div>` : ''}</form>
     ${kind === 'dues' && (x.open_months || []).length > 1 ? `<div class="pay-months" hidden>
-      <div class="small"><b>${T("المبلغ أقل من المطلوب — حدّد الشهور التي تعثّر فيها")}</b> <span class="muted">${T("(اختياري — بدون تحديد يُخصم المبلغ من المتأخرات فقط)")}</span></div>
+      <div class="small"><b>${T("المبلغ أقل من المطلوب — حدّد الشهور التي تعثّر فيها")}</b> <span class="muted">${T("(اختياري — بدون تحديد يُحسب للأشهر الأقدم أولاً)")}</span></div>
       <div class="chips">${x.open_months.map(o => `<label class="chip mchk"><input type="checkbox" value="${o.m}"> ${monLabel(o.m)} <span class="muted num">${money(o.left)}</span></label>`).join('')}</div>
       <div class="small pm-note"></div></div>` : ''}</div>`;
 }
@@ -449,9 +493,13 @@ const collectRow = (r) => `<section class="card c-row ${r.done ? 'done' : ''}">
 VIEWS.flow = async (el, [year]) => {
   const d = S.fund && S.fund.full && year ? S.fund : await bapi('/fund/overview');
   S.fund = d;
-  const years = [...new Set(d.series.map(s => s.m.slice(0, 4)))];
-  const y = years.includes(year) ? year : years[years.length - 1] || d.now.slice(0, 4);
-  const months = d.series.filter(s => s.m.startsWith(y));
+  // the coming months: to the end of this year, and further when someone already paid that far
+  const ahead = new Set(); for (let mo = nextMon(d.now); mo.slice(0, 4) === d.now.slice(0, 4); mo = nextMon(mo)) ahead.add(mo);
+  for (const m of d.members) for (const x of m.months) if (x.m > d.now) ahead.add(x.m);
+  const allMonths = [...d.series, ...[...ahead].sort().map(m => ({ m, income: 0, collected: null, future: true }))];
+  const years = [...new Set(allMonths.map(s => s.m.slice(0, 4)))];
+  const y = years.includes(year) ? year : d.now.slice(0, 4);
+  const months = allMonths.filter(s => s.m.startsWith(y));
   const members = d.members.filter(m => m.contributing || m.total_paid);
   const edit = can('fund_collect') || can('fund_manage');
   el.innerHTML = `${pageHead('list', T("سجل الدفعات"), T("تدفق الأموال الشهري لكل عضو") + (edit ? ' — ' + T("اضغط على أي شهر لتسجيل مبلغه أو تعديله") : ''), `<div class="seg" style="margin:0">${years.map(v => `<label><input type="radio" name="fy" value="${v}" ${v === y ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
@@ -462,13 +510,16 @@ VIEWS.flow = async (el, [year]) => {
       const by = new Map(m.months.map(x => [x.m, x]));
       const cell = (x) => (x.covered ? money(x.covered).replace('.00', '') : '-') + (x.extra ? ` <small class="fx">+${money(x.extra).replace('.00', '')}</small>` : '');
       const tip = (x) => `${STATUS_L[x.status]}: ${money(x.covered)} / ${money(x.due)}${x.paid ? ` — ${T("المستلم في هذا الشهر")} ${money(x.paid)}` : ''}`;
-      const credit = y === d.now.slice(0, 4) && m.credit > 0.005 ? `<div class="small muted">+ ${T("مقدّم")} ${money(m.credit)}</div>` : '';
-      return `<tr><td><b>${esc(m.name)}</b></td><td class="n muted">${money(m.monthly)}</td>${months.map(s => { const x = by.get(s.m); return x ? `<td class="fc ${x.status} ${edit ? 'ed' : ''}" title="${tip(x)}" ${edit ? `data-cell="${m.id}:${x.m}"` : ''}>${cell(x)}</td>` : '<td class="fc none"></td>'; }).join('')}
-        <td class="n"><b>${money(months.reduce((a, s) => a + (by.get(s.m)?.covered || 0) + (by.get(s.m)?.extra || 0), 0) + (credit ? m.credit : 0))}</b>${credit}</td></tr>`;
+      // this year's total also tells what is already paid for the years after it
+      const later = y === d.now.slice(0, 4) ? r2(m.months.filter(x => x.m.slice(0, 4) > y).reduce((a, x) => a + x.covered, 0) + (m.credit || 0)) : 0;
+      const credit = later > 0.005 ? `<div class="small muted">+ ${T("مقدّم لما بعد هذه السنة")} ${money(later)}</div>` : '';
+      const fut = (mo) => m.contributing && !m.left_month && (!m.join_month || m.join_month <= mo) ? { m: mo, due: m.monthly, covered: 0, paid: 0, extra: 0, status: 'future' } : null;
+      return `<tr><td><b>${esc(m.name)}</b></td><td class="n muted">${money(m.monthly)}</td>${months.map(s => { const x = by.get(s.m) || (s.future ? fut(s.m) : null); return x ? `<td class="fc ${x.status} ${edit ? 'ed' : ''}" title="${tip(x)}" ${edit ? `data-cell="${m.id}:${x.m}"` : ''}>${cell(x)}</td>` : '<td class="fc none"></td>'; }).join('')}
+        <td class="n"><b>${money(months.reduce((a, s) => a + (by.get(s.m)?.covered || 0) + (by.get(s.m)?.extra || 0), 0) + later)}</b>${credit}</td></tr>`;
     }).join('')}
     </tbody><tfoot>
-      <tr><td colspan="2"><b>${T("المحصّل فعلياً في الشهر")}</b></td>${months.map(s => `<td class="n"><b>${money(s.income).replace('.00', '')}</b></td>`).join('')}<td class="n"><b>${money(months.reduce((a, s) => a + s.income, 0))}</b></td></tr>
-      <tr><td colspan="2">${T("المجموع التراكمي")}</td>${months.map(s => `<td class="n muted">${money(s.collected).replace('.00', '')}</td>`).join('')}<td></td></tr>
+      <tr><td colspan="2"><b>${T("المحصّل فعلياً في الشهر")}</b></td>${months.map(s => `<td class="n">${s.future ? '' : `<b>${money(s.income).replace('.00', '')}</b>`}</td>`).join('')}<td class="n"><b>${money(months.reduce((a, s) => a + s.income, 0))}</b></td></tr>
+      <tr><td colspan="2">${T("المجموع التراكمي")}</td>${months.map(s => `<td class="n muted">${s.future ? '' : money(s.collected).replace('.00', '')}</td>`).join('')}<td></td></tr>
     </tfoot></table></div></section>`;
   $$('[name=fy]', el).forEach(r => r.onchange = () => { location.hash = '#/flow/' + r.value; });
   $$('[data-cell]', el).forEach(td => td.onclick = () => { const [mid, mo] = td.dataset.cell.split(':'); monthCell(Number(mid), mo, async () => { S.fund = null; await VIEWS.flow(el, [y]); }).catch(fail); });
@@ -480,37 +531,93 @@ VIEWS.flow = async (el, [year]) => {
 // one member × one month: what covers it, the money recorded in that month (delete a wrong one), and add an amount for it
 async function monthCell(mid, mo, after) {
   const m = await bapi('/fund/members/' + mid);
-  const x = m.months.find(q => q.m === mo);
+  const now = (S.fund && S.fund.now) || S.me.today.slice(0, 7);
+  const x = m.months.find(q => q.m === mo) || (mo > now ? { m: mo, due: m.monthly, covered: 0, paid: 0, extra: 0, status: 'future' } : null);
   if (!x) return;
   const pays = m.payments.filter(p => p.kind === 'dues' && p.month === mo);
-  const left = Math.max(0, r2(x.due - x.covered));
-  const fromOther = x.covered > 0.005 && !pays.length;
+  const others = m.payments.filter(p => p.kind === 'dues' && p.month !== mo);
+  // what is typed straight in: the dues tied to this month, and the extra contribution recorded in it
+  const tiedSum = r2(m.payments.filter(p => p.kind === 'dues' && !p.extra && p.for_month === mo).reduce((t, p) => t + p.amount, 0));
+  const extraSum = r2(pays.filter(p => p.extra).reduce((t, p) => t + p.amount, 0));
+  const lumps = m.payments.filter(p => p.kind === 'dues' && !p.extra && !p.for_month);
+  const fromOther = x.covered - tiedSum > 0.005; // part of this month is paid by an amount recorded in one go
+  const mayEdit = (p) => can('fund_manage') || p.created_by === S.me.user.id;
+  const payChip = (p) => `<span class="chip pay"><a href="#/receipt/${p.id}" title="${T("الإيصال")}">${icon('receipt')}</a>${money(p.amount)} <small>${payKind(p)}</small>${p.month !== mo ? ` <small class="muted">· ${T("سُجّلت في")} ${monLabel(p.month)}</small>` : ''}${mayEdit(p) ? `<button type="button" data-edp="${p.id}" title="${T("تعديل")}">${icon('edit')}</button><button type="button" data-delp="${p.id}" title="${T("حذف")}">${icon('x')}</button>` : ''}</span>`;
   const md = modal(`${m.name} — ${monLabel(mo)}`, `<div class="summary-box">
       <div class="r"><span>${T("المستحق لهذا الشهر")}</span><b>${money(x.due)}</b></div>
-      <div class="r"><span>${T("المغطّى")}</span><b>${money(x.covered)}</b> <span class="badge ${x.status === 'missed' ? 'neg' : x.status === 'partial' ? 'warn' : 'pos'}">${STATUS_L[x.status]}</span></div>
-      ${x.extra ? `<div class="r"><span>${T("مساهمة إضافية")}</span><b>${money(x.extra)}</b></div>` : ''}</div>
-    ${fromOther ? `<p class="hint">${icon('info')}<span>${T("هذا الشهر مغطّى من مبلغ سُجّل في شهر آخر. لتوزيعه على الشهور: احذفه من شهره، ثم سجّل مبلغ كل شهر من خانته")}.</span></p>` : ''}
+      <div class="r"><span>${T("الحالة")}</span><span class="badge ${['missed'].includes(x.status) ? 'neg' : ['partial', 'future'].includes(x.status) ? 'warn' : 'pos'}">${STATUS_L[x.status]}</span></div></div>
+    ${fromOther && lumps.length ? `<div class="banner info" style="margin:10px 0">${icon('calendar')}<span class="grow">${T("جزء من هذا الشهر مدفوع من مبالغ سُجّلت مجمّعة")} (${lumps.length}). ${T("قسّمها ليصبح لكل شهر رقمه الخاص الذي تعدّله هنا")}</span><button type="button" class="btn sm" id="mSplit">${T("تقسيم الكل")}</button></div>` : ''}
+    <form autocomplete="off" class="m-set">
+      <div class="fgrid">
+        <label>${T("الاشتراك المدفوع لهذا الشهر")}<input name="dues" type="number" step="0.01" min="0" inputmode="decimal" value="${tiedSum || ''}" placeholder="0"></label>
+        <label>${T("مساهمة إضافية في هذا الشهر")}<input name="extra" type="number" step="0.01" min="0" inputmode="decimal" value="${extraSum || ''}" placeholder="0" ${mo > now ? 'disabled' : ''}></label>
+      </div>
+      <div class="row small" style="margin:6px 0 0;gap:6px"><button type="button" class="btn sm ghost" data-fill="${x.due}">${T("المستحق")} ${money(x.due)}</button><button type="button" class="btn sm ghost" data-fill="0">${T("لم يدفع")} (0)</button></div>
+      <p class="muted small" id="mNote" style="margin:6px 0 0"></p>
+      <div class="mf"><button class="btn primary">${icon('check')}${T("حفظ")}</button><button type="button" class="btn" data-x>${T("إغلاق")}</button></div></form>
     <div class="sec-title">${T("المبالغ المسجّلة في هذا الشهر")}</div>
-    ${pays.length ? `<div class="chips">${pays.map(p => `<span class="chip pay"><a href="#/receipt/${p.id}" title="${T("الإيصال")}">${icon('receipt')}</a>${money(p.amount)}${p.extra ? ` <small>${T("إضافية")}</small>` : ''}${p.for_month && p.for_month !== p.month ? ` <small class="muted">${T("عن")} ${monLabel(p.for_month)}</small>` : ''}${can('fund_manage') || p.created_by === S.me.user.id ? `<button type="button" data-delp="${p.id}" title="${T("حذف")}">${icon('x')}</button>` : ''}</span>`).join('')}</div>` : `<p class="muted small">${T("لا يوجد")}</p>`}
-    <form autocomplete="off" style="margin-top:12px"><label>${T("إضافة مبلغ لهذا الشهر")}<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${left || ''}"></label>
-      <div class="pay-extra" hidden style="margin-top:8px"><div class="small"><b>${T("الزيادة عن المستحق")}: <span class="px-amt num"></span></b> — ${T("ماذا نفعل بالزيادة؟")}</div>
-        <label class="check"><input type="radio" name="px" value="extra" checked> ${T("مساهمة إضافية")}</label>
-        <div class="muted small" style="margin:-4px 0 2px;padding-inline-start:26px">${T("(تزيد مساهماته وأحقيته في القرض، ويبقى عليه اشتراك الشهور القادمة)")}</div>
-        <label class="check"><input type="radio" name="px" value="ahead"> ${T("دفعة مقدّمة للشهور القادمة")}</label></div>
-      <div class="mf"><button class="btn primary">${icon('check')}${T("تسجيل")}</button><button type="button" class="btn" data-x>${T("إغلاق")}</button></div></form>`);
-  const f = $('form', md.el), xb = $('.pay-extra', md.el);
-  const over = () => r2((Number(f.amount.value) || 0) - left);
-  const draw = () => { const o = over(); xb.hidden = !(o > 0.005); $('.px-amt', xb).textContent = money(Math.max(0, o)); };
-  f.oninput = draw; draw();
+    ${pays.length ? `<div class="chips">${pays.map(payChip).join('')}</div>` : `<p class="muted small">${T("لا يوجد")}</p>`}
+    ${others.length ? `<details class="pm-others"><summary>${T("دفعات العضو في الأشهر الأخرى")} (${others.length})</summary><div class="chips" style="margin-top:8px">${others.map(payChip).join('')}</div></details>` : ''}`);
+  const f = $('form.m-set', md.el);
+  const note = () => { const v = Number(f.dues.value) || 0;
+    $('#mNote', md.el).textContent = v > x.due + 0.005 ? `${T("الزيادة عن المستحق")} (${money(r2(v - x.due))}) ${T("تُحسب للأشهر غير المدفوعة أو القادمة")}` : ''; };
+  f.oninput = note; note();
+  $$('[data-fill]', f).forEach(b => b.onclick = () => { f.dues.value = b.dataset.fill === '0' ? '0' : b.dataset.fill; note(); f.dues.focus(); });
   f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
-    const extra = !xb.hidden && f.px.value === 'extra' ? over() : undefined;
-    const r = await bapi('/fund/payments', { method: 'POST', body: { member_id: mid, month: mo, kind: 'dues', amount: f.amount.value, months: left > 0.005 ? [mo] : undefined, extra } });
-    md.close(); toast(`${T("تم تسجيل")} ${money(f.amount.value)} ✓ — ${T("إيصال")} ${r.nos.join('، ')}`, 'ok'); after();
+    // a coming month paid today: recorded as received now, for that month
+    const body = { dues: f.dues.value === '' ? 0 : f.dues.value };
+    if (!f.extra.disabled) body.extra = f.extra.value === '' ? 0 : f.extra.value;
+    await bapi(`/fund/members/${mid}/month/${mo}`, { method: 'PUT', body });
+    md.close(); toast(`${T("تم حفظ")} ${monLabel(mo)} ✓`, 'ok'); after();
   }); };
+  const sp = $('#mSplit', md.el);
+  if (sp) sp.onclick = () => busy(sp, async () => {
+    const r = await bapi(`/fund/members/${mid}/split-all`, { method: 'POST' });
+    toast(`${T("تم التقسيم")}: ${r.payments} ${T("دفعات")} ✓`, 'ok'); md.close(); await after(); monthCell(mid, mo, after);
+  });
   $$('[data-delp]', md.el).forEach(b => b.onclick = async () => {
     if (!await confirmBox(T("حذف الدفعة"), `<p>${T("حذف هذه الدفعة؟ ستظهر في سجل التعديلات")}.</p>`, T("حذف"), true)) return;
     try { await bapi('/fund/payments/' + b.dataset.delp, { method: 'DELETE' }); md.close(); toast(T("تم الحذف"), 'ok'); after(); } catch (err) { fail(err); }
   });
+  $$('[data-edp]', md.el).forEach(b => b.onclick = () => paymentEdit(m.payments.find(p => p.id == b.dataset.edp), m, () => { md.close(); after(); }, mo));
+}
+const payKind = (p) => p.kind !== 'dues' ? T("قسط قرض") : p.extra ? T("مساهمة إضافية") : p.for_month ? `${T("عن")} ${monLabel(p.for_month)}` : T("اشتراك");
+// correct a recorded payment: amount, and what it counts for
+// ctx = the month whose cell the edit was opened from: the month list starts there
+function paymentEdit(p, m, after, ctx) {
+  const dues = p.kind === 'dues';
+  const mode = p.extra ? 'extra' : p.for_month ? 'month' : 'auto';
+  const pick = ctx || p.for_month || p.month;
+  const nowM = (S.fund && S.fund.now) || S.me.today.slice(0, 7);
+  const set = new Set((m.months || []).map(x => x.m)); for (let mo = nowM, i = 0; i < 24; i++) { mo = nextMon(mo); set.add(mo); }
+  const months = [...set].sort().reverse();
+  const md = modal(`${T("تعديل دفعة")} — ${m.name}`, `<form autocomplete="off">
+    <div class="summary-box"><div class="r"><span>${T("سُجّلت في")}</span><b>${monLabel(p.month)}</b></div><div class="r"><span>${T("الإيصال")}</span><span dir="ltr">R-${String(p.id).padStart(6, '0')}</span></div>
+      ${ctx ? `<div class="r t"><span>${T("تعدّل من خانة شهر")}</span><b>${monLabel(ctx)}</b></div>` : ''}</div>
+    <label>${T("المبلغ")}<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${p.amount}"></label>
+    ${dues ? `<div class="sec-title" style="margin-top:12px">${T("تُحسب هذه الدفعة")}</div>
+      <label class="check"><input type="radio" name="mode" value="auto" ${mode === 'auto' ? 'checked' : ''}> ${T("اشتراك — للأشهر الأقدم غير المدفوعة أولاً")}</label>
+      <label class="check"><input type="radio" name="mode" value="month" ${mode === 'month' ? 'checked' : ''}> ${T("اشتراك شهر محدد")}</label>
+      <select name="for_month" style="margin:4px 0 8px">${months.map(x => `<option value="${x}" ${x === pick ? 'selected' : ''}>${monLabel(x)}</option>`).join('')}</select>
+      <label class="check"><input type="radio" name="mode" value="extra" ${mode === 'extra' ? 'checked' : ''}> ${T("مساهمة إضافية (لا تغطي أي شهر)")}</label>` : ''}
+    <label style="margin-top:10px">${T("ملاحظة")} <span class="opt">${T("(اختياري)")}</span><input name="note" maxlength="300" value="${esc(p.note || '')}"></label>
+    <p class="hint">${icon('info')}<span>${T("يُسجّل التعديل باسمك في «سجل التعديلات» مع القيمة قبل وبعد")}.</span></p>
+    ${dues && !p.extra && p.amount > (m.monthly || 0) + 0.005 ? `<div class="banner info" style="margin:10px 0 0">${icon('calendar')}<span class="grow">${T("هذا مبلغ مجمّع لأكثر من شهر. قسّمه ليصبح كل شهر دفعة مستقلة تُعدّل وحدها")}</span><button type="button" class="btn sm" id="pSplit">${T("تقسيم على الأشهر")}</button></div>` : ''}
+    <div class="mf"><button class="btn primary">${icon('check')}${T("حفظ التعديل")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`);
+  const sp = $('#pSplit', md.el);
+  if (sp) sp.onclick = () => busy(sp, async () => {
+    const r = await bapi(`/fund/payments/${p.id}/split`, { method: 'POST' });
+    md.close(); toast(`${T("تم التقسيم")}: ${r.parts} ${T("دفعات")} ✓`, 'ok'); after();
+  });
+  const f = $('form', md.el);
+  // picking a month means "for that month"
+  if (f.for_month) { f.for_month.addEventListener('change', () => { f.querySelector('[name=mode][value=month]').checked = true; }); f.for_month.addEventListener('focus', () => { f.querySelector('[name=mode][value=month]').checked = true; }); }
+  f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+    const body = { amount: f.amount.value, note: f.note.value };
+    if (dues) Object.assign(body, { mode: f.mode.value, for_month: f.for_month.value });
+    await bapi('/fund/payments/' + p.id, { method: 'PUT', body });
+    md.close(); toast(T("تم حفظ التعديل"), 'ok'); after();
+  }); };
 }
 
 /* ───────────── members & family tree ───────────── */

@@ -11,7 +11,7 @@ const FUND_PERMS = {
   fund_view_all: 'رؤية التزام جميع الأعضاء والتقارير الكاملة',
   fund_manage: 'إدارة الصندوق (الأعضاء، الشجرة، المبالغ، القروض، الإعدادات)',
 };
-const FUND_EDIT_ACTIONS = ['fund_impact_page', 'fund_goal_update', 'fund_goal_delete', 'fund_gift_delete', 'fund_payment_delete', 'fund_member_update', 'fund_member_delete', 'fund_rate', 'fund_settings', 'fund_category_update', 'fund_loan_update', 'fund_loan_delete', 'fund_account_password'];
+const FUND_EDIT_ACTIONS = ['fund_month_set', 'fund_payment_split', 'fund_payment_update', 'fund_impact_page', 'fund_goal_update', 'fund_goal_delete', 'fund_gift_delete', 'fund_payment_delete', 'fund_member_update', 'fund_member_delete', 'fund_rate', 'fund_settings', 'fund_category_update', 'fund_loan_update', 'fund_loan_delete', 'fund_account_password'];
 
 const crypto = require('crypto');
 // a fixed but meaningless order for hidden names, so 'member 3' cannot be matched with the 3rd name in the tree
@@ -19,7 +19,9 @@ const shuffleKey = (bid, id, salt) => crypto.createHash('sha256').update(bid + '
 const isMonth = (s) => typeof s === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(s);
 const prevMonth = (m) => { let [y, mo] = m.split('-').map(Number); if (--mo < 1) { mo = 12; y--; } return `${y}-${String(mo).padStart(2, '0')}`; };
 const receiptNo = (id) => 'R-' + String(id).padStart(6, '0');
+const AHEAD = 24; // how many months ahead a member may pay
 const nextMonth = (m) => { let [y, mo] = m.split('-').map(Number); if (++mo > 12) { mo = 1; y++; } return `${y}-${String(mo).padStart(2, '0')}`; };
+const addMonths = (m, n) => { for (let i = 0; i < n; i++) m = nextMonth(m); return m; };
 const monthsBetween = (a, b) => { const out = []; for (let m = a; m <= b && out.length < 1200; m = nextMonth(m)) out.push(m); return out; };
 const sum = (list, f) => list.reduce((t, x) => t + (f ? f(x) : x), 0);
 const groupBy = (list, k) => { const m = new Map(); for (const x of list) { if (!m.has(x[k])) m.set(x[k], []); m.get(x[k]).push(x); } return m; };
@@ -62,11 +64,14 @@ module.exports = function mountFund(app, biz, ctx) {
     const dueOf = (mo) => m.contributing && (!m.left_month || mo <= m.left_month) ? rateAt(mo) : 0;
     // a payment the collector tied to a month (for_month) covers that month; all other money (and any excess)
     // fills the oldest unpaid months first — so a month paid late counts as paid, and the months not chosen stay late
-    const inRange = new Set(months), tied = new Map(), tiedOnTime = new Map(), freeIn = new Map(), shown = new Map();
+    // months still to come may be paid ahead (tied to a month, or money left over after every past month)
+    const tied = new Map(), tiedOnTime = new Map(), freeIn = new Map(), shown = new Map();
+    let lastTied = now;
     for (const p of dues) {
       shown.set(p.month, (shown.get(p.month) || 0) + p.amount);
       let free = p.amount;
-      if (p.for_month && inRange.has(p.for_month)) {
+      if (p.for_month && p.for_month >= from && dueOf(p.for_month) > 0) {
+        if (p.for_month > lastTied) lastTied = p.for_month;
         const t = Math.min(free, Math.max(0, dueOf(p.for_month) - (tied.get(p.for_month) || 0)));
         tied.set(p.for_month, (tied.get(p.for_month) || 0) + t); free -= t;
         if (p.month === p.for_month) tiedOnTime.set(p.month, (tiedOnTime.get(p.month) || 0) + t);
@@ -75,6 +80,12 @@ module.exports = function mountFund(app, biz, ctx) {
     }
     // paid = the money recorded so far covers it (oldest first); on time = it was covered by money paid by the end of that month
     let pool = sum([...freeIn.values()]), cumDue = 0, cumPaid = sum([...freeIn].filter(([mo]) => mo < from), ([, v]) => v);
+    // after the current month: keep going while a month is paid ahead (tied, or covered by money left over)
+    if (from <= now) for (let mo = nextMonth(now), i = 0; i < AHEAD + 120; mo = nextMonth(mo), i++) {
+      const owed = sum(months, x => dueOf(x) - (tied.get(x) || 0));
+      if (mo > lastTied && !(pool - owed > 0.005 && dueOf(mo) > 0)) break;
+      months.push(mo);
+    }
     const list = months.map(mo => {
       const due = dueOf(mo), fixed = tied.get(mo) || 0;
       const paid = shown.get(mo) || 0;
@@ -82,7 +93,8 @@ module.exports = function mountFund(app, biz, ctx) {
       const covered = fixed + take;
       const prev = cumDue; cumDue += due - fixed; cumPaid += freeIn.get(mo) || 0;
       const onTime = (tiedOnTime.get(mo) || 0) + Math.min(due - fixed, Math.max(0, cumPaid - prev));
-      const status = due <= 0 ? 'none' : covered >= due - 0.005 ? (onTime >= due - 0.005 || mo >= now ? 'full' : 'late') : mo === now ? 'open' : covered > 0.005 ? 'partial' : 'missed';
+      const status = due <= 0 ? 'none' : mo > now ? (covered >= due - 0.005 ? 'ahead' : 'future')
+        : covered >= due - 0.005 ? (onTime >= due - 0.005 || mo >= now ? 'full' : 'late') : mo === now ? 'open' : covered > 0.005 ? 'partial' : 'missed';
       return { m: mo, due: r2(due), paid: r2(paid), covered: r2(covered), status };
     });
     const closed = list.filter(x => x.m < now && x.due > 0);
@@ -99,7 +111,7 @@ module.exports = function mountFund(app, biz, ctx) {
       // money paid ahead: recorded dues not yet used by any month
       credit: r2(Math.max(0, (totalPaid - extraPaid) - sum(list, x => x.covered))),
       monthly: r2(rateAt(now)), total_paid: r2(totalPaid), extra_paid: r2(extraPaid),
-      arrears: r2(Math.max(0, sum(list.filter(x => x.m < now), x => x.due) - (totalPaid - extraPaid))),
+      arrears: r2(sum(list.filter(x => x.m < now), x => Math.max(0, x.due - x.covered))),
       this_month: curRow ? { due: curRow.due, paid: curRow.paid, remaining: r2(Math.max(0, curRow.due - curRow.covered)), status: curRow.status } : null,
       due_closed: r2(dueClosed), covered_closed: r2(coveredClosed),
       commitment: commitment === null ? null : Math.round(commitment * 1000) / 10,
@@ -190,7 +202,8 @@ module.exports = function mountFund(app, biz, ctx) {
       const dues = { due: dueM, arrears: r2(Math.max(0, duePrev - paidPrev)), required: r2(Math.max(0, dueM + duePrev - paidPrev)),
         paid: r2(sum(pays.filter(p => p.kind === 'dues' && !p.extra && p.month === M), p => p.amount)), payments: pays.filter(p => p.kind === 'dues' && p.month === M),
         extra: r2(sum(pays.filter(p => p.kind === 'dues' && p.extra && p.month === M), p => p.amount)),
-        open_months: m.months.filter(x => x.m <= M && x.due - x.covered > 0.005).map(x => ({ m: x.m, left: r2(x.due - x.covered) })) };
+        open_months: m.months.filter(x => x.m <= M && x.due - x.covered > 0.005).map(x => ({ m: x.m, left: r2(x.due - x.covered) })),
+        monthly: m.monthly, cal: m.months.filter(x => x.due > 0).map(x => ({ m: x.m, due: x.due, left: r2(Math.max(0, x.due - x.covered)), status: x.status })) };
       const loans = d.loans.filter(l => l.member_id === m.id && l.start_month <= M && l.issued_date.slice(0, 7) <= M).map(l => {
         const lp = pays.filter(p => p.kind === 'installment' && p.loan_id === l.id);
         const paidBefore = sum(lp.filter(p => p.month < M), p => p.amount);
@@ -207,13 +220,42 @@ module.exports = function mountFund(app, biz, ctx) {
       totals: { required: r2(sum(rows, r => r.dues.required + sum(r.loans, l => l.required))), paid: r2(sum(rows, r => r.dues.paid + sum(r.loans, l => l.paid))), open: rows.filter(r => !r.done).length } };
   }));
 
+  // dues money is always saved month by month (one receipt each), so every month can later be corrected on its own:
+  // the chosen months first (or the oldest unpaid ones), then the coming months; whatever is still left stays unassigned
+  function allocate(d, m, amount, picked) {
+    const cm = compute(d).members.find(q => q.id === m.id);
+    const months = cm ? cm.months : [];
+    const left = new Map(months.map(q => [q.m, r2(q.due - q.covered)]));
+    const monthly = cm ? cm.monthly : 0;
+    const lim = m.left_month && m.left_month < addMonths(cur(), AHEAD) ? m.left_month : addMonths(cur(), AHEAD);
+    const leftOf = (mo) => left.has(mo) ? left.get(mo) : (mo > cur() && mo <= lim ? monthly : 0);
+    const out = []; let rest = r2(amount);
+    const take = (mo) => { const l = leftOf(mo); if (l <= 0.005 || rest <= 0.005) return; const a = r2(Math.min(rest, l)); out.push({ for_month: mo, amount: a }); left.set(mo, r2(l - a)); rest = r2(rest - a); };
+    if (picked) for (const mo of picked) take(mo);
+    else for (const q of months) if (q.m <= cur()) take(q.m);
+    for (let mo = nextMonth(cur()); rest > 0.005 && mo <= lim && monthly > 0; mo = nextMonth(mo)) take(mo);
+    if (rest > 0.005) out.push({ for_month: null, amount: rest });
+    return out;
+  }
   biz.post('/fund/payments', need('fund_collect', 'fund_manage'), wrap(async (req) => {
     const x = req.body || {};
     const s = await db.get('SELECT * FROM fund_settings WHERE business_id = ?', req.biz.id);
     const m = await db.get('SELECT * FROM fund_members WHERE id = ? AND business_id = ? AND deleted_at IS NULL', idOf(x.member_id), req.biz.id);
     if (!m) bad('العضو غير موجود');
     if (!isMonth(x.month) || x.month > cur() || x.month < s.start_month) bad('الشهر غير صحيح');
-    const amount = num(x.amount);
+    // months picked one by one with their own amounts (the month picker)
+    let given = null;
+    if (x.kind !== 'installment' && Array.isArray(x.parts) && x.parts.length) {
+      if (x.parts.length > 60) bad('عدد الشهور كبير جداً');
+      const seen = new Set();
+      given = x.parts.map(q => {
+        const mo = String(q.month || ''), a = r2(num(q.amount));
+        if (!isMonth(mo) || mo < s.start_month || mo > addMonths(cur(), AHEAD) || seen.has(mo)) bad('الشهر غير صحيح');
+        if (!(a > 0)) bad('المبلغ يجب أن يكون أكبر من صفر');
+        seen.add(mo); return { for_month: mo, amount: a };
+      }).sort((a, b) => a.for_month < b.for_month ? -1 : 1);
+    }
+    const amount = given ? r2(given.reduce((t, q) => t + q.amount, 0)) : num(x.amount);
     if (!(amount > 0)) bad('المبلغ يجب أن يكون أكبر من صفر');
     const kind = x.kind === 'installment' ? 'installment' : 'dues';
     let loan_id = null;
@@ -226,22 +268,25 @@ module.exports = function mountFund(app, biz, ctx) {
     }
     // dues paid short: the collector may say which months this money is for — the others stay late (one receipt per month)
     // part (or all) of the money as an extra contribution: raises the member's total (and loan right), pays no month
-    const extra = kind === 'dues' && x.extra !== undefined && x.extra !== '' && x.extra !== null ? r2(num(x.extra)) : 0;
+    const extra = kind === 'dues' && !given && x.extra !== undefined && x.extra !== '' && x.extra !== null ? r2(num(x.extra)) : 0;
     if (!(extra >= 0) || extra > r2(amount) + 0.005) bad('المساهمة الإضافية يجب أن تكون بين صفر والمبلغ المدفوع');
     const dueAmount = r2(amount - extra);
     let parts = dueAmount > 0.005 ? [{ for_month: null, amount: dueAmount }] : [];
-    if (kind === 'dues' && dueAmount > 0.005 && Array.isArray(x.months) && x.months.length) {
-      if (x.months.length > 120) bad('عدد الشهور كبير جداً');
-      const cm = compute(await load(req.biz.id)).members.find(q => q.id === m.id);
-      const left = new Map((cm ? cm.months : []).map(q => [q.m, r2(q.due - q.covered)]));
-      let rest = dueAmount; parts = [];
-      for (const mo of [...new Set(x.months.map(String))].sort()) {
-        if (!isMonth(mo) || mo > x.month || !(left.get(mo) > 0.005)) bad('لا يوجد مبلغ مستحق في شهر {month}', { month: mo });
-        if (rest <= 0.005) break;
-        const a = r2(Math.min(rest, left.get(mo)));
-        parts.push({ for_month: mo, amount: a }); rest = r2(rest - a);
+    if (given) parts = given;
+    else if (kind === 'dues' && dueAmount > 0.005) {
+      const d = await load(req.biz.id);
+      let picked = null;
+      if (Array.isArray(x.months) && x.months.length) {
+        if (x.months.length > 120) bad('عدد الشهور كبير جداً');
+        const cm = compute(d).members.find(q => q.id === m.id);
+        const left = new Map((cm ? cm.months : []).map(q => [q.m, r2(q.due - q.covered)]));
+        picked = [...new Set(x.months.map(String))].sort();
+        for (const mo of picked) {
+          const ahead = isMonth(mo) && mo > cur() && mo <= addMonths(cur(), AHEAD);
+          if (!isMonth(mo) || (mo > x.month && !ahead) || !((left.has(mo) ? left.get(mo) : ahead ? 1 : 0) > 0.005)) bad('لا يوجد مبلغ مستحق في شهر {month}', { month: mo });
+        }
       }
-      if (rest > 0.005) parts.push({ for_month: null, amount: rest });
+      parts = allocate(d, m, dueAmount, picked);
     }
     if (extra > 0.005) parts.push({ for_month: null, amount: extra, extra: 1 });
     const note = String(x.note || '').trim().slice(0, 300) || null;
@@ -257,6 +302,116 @@ module.exports = function mountFund(app, biz, ctx) {
       await receiptNotice(req, m, { id, month: pt.for_month || x.month, kind, amount: pt.amount });
     }
     return { id: ids[0], no: receiptNo(ids[0]), ids, nos: ids.map(receiptNo) };
+  }));
+  // an amount recorded in one go (older entries) → one payment per month, so each month can be corrected on its own
+  biz.post('/fund/payments/:id/split', need('fund_collect', 'fund_manage'), wrap(async (req) => {
+    const p = await db.get('SELECT p.*, m.name member FROM fund_payments p JOIN fund_members m ON m.id = p.member_id WHERE p.id = ? AND p.business_id = ? AND p.deleted_at IS NULL', idOf(req.params.id), req.biz.id);
+    if (!p) throw new HttpError(404, 'غير موجود');
+    if (!req.can('fund_manage') && p.created_by !== req.user.id) throw new HttpError(403, 'يمكنك تعديل الدفعات التي سجلتها أنت فقط');
+    if (p.kind !== 'dues' || p.extra) bad('هذه الدفعة لا تُقسّم على الأشهر');
+    const m = await db.get('SELECT * FROM fund_members WHERE id = ?', p.member_id);
+    const d = await load(req.biz.id);
+    d.payments = d.payments.filter(q => q.id !== p.id); // as if this payment were not there yet
+    const parts = allocate(d, m, p.amount, p.for_month ? [p.for_month] : null);
+    const ids = await db.tx(async () => {
+      await db.run('UPDATE fund_payments SET deleted_at = ?, deleted_by = ? WHERE id = ?', ctx.nowLocal(), req.user.id, p.id);
+      const out = [];
+      for (const pt of parts) out.push(await db.insert('INSERT INTO fund_payments (business_id, member_id, month, kind, loan_id, amount, note, created_by, for_month, extra) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        req.biz.id, p.member_id, p.month, 'dues', null, pt.amount, p.note, p.created_by, pt.for_month, 0));
+      return out;
+    });
+    await audit(req.biz.id, req.user.id, 'fund_payment_split', { before: { member: p.member, month: p.month, amount: p.amount, receipt: receiptNo(p.id) },
+      after: { member: p.member, months: parts.map(q => `${q.for_month || '—'}: ${q.amount}`).join('، '), receipts: ids.map(receiptNo).join('، ') } });
+    return { ok: true, ids, nos: ids.map(receiptNo), parts: parts.length };
+  }));
+  // one month of a member, typed straight in: the dues paid for it and the extra contribution of that month.
+  // The month's own records are adjusted to match (first one updated, the rest removed, or a new one added) — logged.
+  biz.put('/fund/members/:id/month/:mo', need('fund_collect', 'fund_manage'), wrap(async (req) => {
+    const m = await db.get('SELECT * FROM fund_members WHERE id = ? AND business_id = ? AND deleted_at IS NULL', idOf(req.params.id), req.biz.id);
+    if (!m) throw new HttpError(404, 'غير موجود');
+    const s = await db.get('SELECT start_month FROM fund_settings WHERE business_id = ?', req.biz.id);
+    const mo = String(req.params.mo), x = req.body || {};
+    if (!isMonth(mo) || mo < s.start_month || mo > addMonths(cur(), AHEAD)) bad('الشهر غير صحيح');
+    const val = (v) => v === undefined || v === null || v === '' ? null : r2(num(v));
+    const N = val(x.dues), E = val(x.extra);
+    if ((N !== null && !(N >= 0)) || (E !== null && !(E >= 0))) bad('المبلغ غير صحيح');
+    if (E !== null && E > 0 && mo > cur()) bad('المساهمة الإضافية تُسجّل في شهر حاضر أو سابق');
+    const rows = await db.all("SELECT * FROM fund_payments WHERE member_id = ? AND kind = 'dues' AND deleted_at IS NULL ORDER BY id", m.id);
+    const tied = rows.filter(p => !p.extra && p.for_month === mo), extras = rows.filter(p => p.extra && p.month === mo);
+    const mine = (list) => req.can('fund_manage') || list.every(p => p.created_by === req.user.id);
+    const sumOf = (list) => r2(list.reduce((t, p) => t + p.amount, 0));
+    const before = { dues: sumOf(tied), extra: sumOf(extras) };
+    const now = ctx.nowLocal();
+    const changed = [];
+    const adjust = async (list, target, make) => {
+      if (target === null || Math.abs(sumOf(list) - target) < 0.005) return;
+      if (!mine(list)) throw new HttpError(403, 'يمكنك تعديل الدفعات التي سجلتها أنت فقط');
+      if (target <= 0.005) { for (const p of list) await db.run('UPDATE fund_payments SET deleted_at = ?, deleted_by = ? WHERE id = ?', now, req.user.id, p.id); }
+      else if (list.length) {
+        await db.run('UPDATE fund_payments SET amount = ? WHERE id = ?', target, list[0].id);
+        for (const p of list.slice(1)) await db.run('UPDATE fund_payments SET deleted_at = ?, deleted_by = ? WHERE id = ?', now, req.user.id, p.id);
+      } else changed.push(await db.insert('INSERT INTO fund_payments (business_id, member_id, month, kind, loan_id, amount, note, created_by, for_month, extra) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        req.biz.id, m.id, ...make(target)));
+    };
+    await db.tx(async () => {
+      await adjust(tied, N, (a) => [mo > cur() ? cur() : mo, 'dues', null, a, null, req.user.id, mo, 0]);
+      await adjust(extras, E, (a) => [mo, 'dues', null, a, null, req.user.id, null, 1]);
+    });
+    const after = { dues: N ?? before.dues, extra: E ?? before.extra };
+    if (before.dues !== after.dues || before.extra !== after.extra) await audit(req.biz.id, req.user.id, 'fund_month_set', { member: m.name, month: mo, before, after });
+    return { ok: true, new_ids: changed, nos: changed.map(receiptNo) };
+  }));
+  // every amount of a member recorded in one go → one payment per month (older entries), so each month is edited on its own
+  biz.post('/fund/members/:id/split-all', need('fund_collect', 'fund_manage'), wrap(async (req) => {
+    const m = await db.get('SELECT * FROM fund_members WHERE id = ? AND business_id = ? AND deleted_at IS NULL', idOf(req.params.id), req.biz.id);
+    if (!m) throw new HttpError(404, 'غير موجود');
+    const lumps = await db.all("SELECT * FROM fund_payments WHERE member_id = ? AND kind = 'dues' AND extra = 0 AND for_month IS NULL AND deleted_at IS NULL ORDER BY id", m.id);
+    if (!req.can('fund_manage') && lumps.some(p => p.created_by !== req.user.id)) throw new HttpError(403, 'يمكنك تعديل الدفعات التي سجلتها أنت فقط');
+    let made = 0;
+    for (const p of lumps) {
+      const d = await load(req.biz.id);
+      d.payments = d.payments.filter(q => q.id !== p.id);
+      const parts = allocate(d, m, p.amount, null);
+      const ids = await db.tx(async () => {
+        await db.run('UPDATE fund_payments SET deleted_at = ?, deleted_by = ? WHERE id = ?', ctx.nowLocal(), req.user.id, p.id);
+        const out = [];
+        for (const pt of parts) out.push(await db.insert('INSERT INTO fund_payments (business_id, member_id, month, kind, loan_id, amount, note, created_by, for_month, extra) VALUES (?,?,?,?,?,?,?,?,?,?)',
+          req.biz.id, p.member_id, p.month, 'dues', null, pt.amount, p.note, p.created_by, pt.for_month, 0));
+        return out;
+      });
+      made += ids.length;
+      await audit(req.biz.id, req.user.id, 'fund_payment_split', { before: { member: m.name, month: p.month, amount: p.amount, receipt: receiptNo(p.id) },
+        after: { member: m.name, months: parts.map(q => `${q.for_month || '—'}: ${q.amount}`).join('، '), receipts: ids.map(receiptNo).join('، ') } });
+    }
+    return { ok: true, lumps: lumps.length, payments: made };
+  }));
+  // correct a recorded payment: its amount, and what it is for — the oldest months (auto), one chosen month, or an extra contribution
+  biz.put('/fund/payments/:id', need('fund_collect', 'fund_manage'), wrap(async (req) => {
+    const p = await db.get('SELECT p.*, m.name member FROM fund_payments p JOIN fund_members m ON m.id = p.member_id WHERE p.id = ? AND p.business_id = ? AND p.deleted_at IS NULL', idOf(req.params.id), req.biz.id);
+    if (!p) throw new HttpError(404, 'غير موجود');
+    if (!req.can('fund_manage') && p.created_by !== req.user.id) throw new HttpError(403, 'يمكنك تعديل الدفعات التي سجلتها أنت فقط');
+    const x = req.body || {};
+    const s = await db.get('SELECT start_month FROM fund_settings WHERE business_id = ?', req.biz.id);
+    const amount = x.amount === undefined ? p.amount : r2(num(x.amount));
+    if (!(amount > 0)) bad('المبلغ يجب أن يكون أكبر من صفر');
+    let for_month = p.for_month, extra = p.extra ? 1 : 0;
+    if (p.kind === 'installment') {
+      const paid = (await db.get('SELECT COALESCE(SUM(amount),0) v FROM fund_payments WHERE loan_id = ? AND deleted_at IS NULL AND id <> ?', p.loan_id, p.id)).v;
+      const l = await db.get('SELECT amount FROM fund_loans WHERE id = ?', p.loan_id);
+      if (l && amount > l.amount - paid + 0.005) bad('المبلغ أكبر من المتبقي من القرض ({remaining})', { remaining: r2(l.amount - paid).toFixed(2) });
+    } else if (x.mode !== undefined) {
+      if (x.mode === 'extra') { extra = 1; for_month = null; }
+      else if (x.mode === 'month') {
+        if (!isMonth(x.for_month) || x.for_month > addMonths(cur(), AHEAD) || x.for_month < s.start_month) bad('الشهر غير صحيح');
+        extra = 0; for_month = x.for_month;
+      } else { extra = 0; for_month = null; }
+    }
+    const note = x.note === undefined ? p.note : (String(x.note || '').trim().slice(0, 300) || null);
+    await db.run('UPDATE fund_payments SET amount = ?, for_month = ?, extra = ?, note = ? WHERE id = ?', amount, for_month, extra, note, p.id);
+    const what = (a, f, e) => e ? 'مساهمة إضافية' : f ? `اشتراك شهر ${f}` : 'اشتراك (الأقدم أولاً)';
+    await audit(req.biz.id, req.user.id, 'fund_payment_update', { before: { member: p.member, month: p.month, amount: p.amount, kind: what(p.amount, p.for_month, p.extra) },
+      after: { member: p.member, month: p.month, amount, kind: what(amount, for_month, extra) } });
+    return { ok: true };
   }));
   biz.delete('/fund/payments/:id', need('fund_collect', 'fund_manage'), wrap(async (req) => {
     const p = await db.get('SELECT p.*, m.name member FROM fund_payments p JOIN fund_members m ON m.id = p.member_id WHERE p.id = ? AND p.business_id = ? AND p.deleted_at IS NULL', idOf(req.params.id), req.biz.id);
