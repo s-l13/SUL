@@ -379,7 +379,7 @@ VIEWS.collect = async (el, [month]) => {
       <button class="icon-btn" id="mPrev" ${d.month <= d.start ? 'disabled' : ''}>${icon('chevR')}</button>
       <b class="grow center">${monLabel(d.month)}${d.month === d.now ? ` <span class="badge info">${T("الشهر الحالي")}</span>` : ''}</b>
       <button class="icon-btn" id="mNext" ${d.month >= d.now ? 'disabled' : ''}>${icon('chevL')}</button></div>
-      <div class="grid kpis fk" style="margin:12px 0 0">${fk(T("المطلوب هذا الشهر"), M(d.totals.required), 'sigma')}${fk(T("المحصّل"), M(d.totals.paid), 'check', 'pos')}${fk(T("لم يكتمل"), `${d.totals.open} ${T("عضو")}`, 'alert', d.totals.open ? 'warn' : '')}</div>
+      <div class="grid kpis fk" style="margin:12px 0 0">${fk(T("المتبقي على الأعضاء"), M(d.totals.left), 'sigma')}${fk(T("المحصّل في هذا الشهر"), M(d.totals.paid), 'check', 'pos')}${fk(T("لم يكتمل"), `${d.totals.open} ${T("عضو")}`, 'alert', d.totals.open ? 'warn' : '')}</div>
       <div class="row" style="margin-top:12px"><input id="cq" placeholder="${T("بحث بالاسم…")}" value="${esc(q)}" style="flex:1;min-width:140px">
         <label class="check"><input type="checkbox" id="cOpen" ${onlyOpen ? 'checked' : ''}> ${T("غير المكتمل فقط")}</label></div></section>
     <div id="cList">${rows.map(collectRow).join('') || `<div class="empty">${onlyOpen ? T("الجميع دفع هذا الشهر ✓") : T("لا يوجد أعضاء")}</div>`}</div>`;
@@ -456,7 +456,10 @@ function monthsPicker(row, M, now, after) {
     ${years.map(y => `<div class="cal-y"><b>${y}</b><div class="cal-g">${months.filter(mo => mo.startsWith(y)).map(mo => { const c = info(mo), paid = c.left <= 0.005 && c.due > 0;
       return `<button type="button" class="cal-m ms-${c.status} ${paid ? 'paid' : ''}" data-mo="${mo}" ${paid ? 'disabled' : ''}><span>${monName(mo)}</span><small class="num">${paid ? '✓' : money(c.left || x.monthly).replace('.00', '')}</small></button>`; }).join('')}</div></div>`).join('')}
     <div id="calSel" class="cal-sel"></div>
-    <div class="summary-box"><div class="r t"><span>${T("المجموع")}</span><b id="calTot" class="num">0.00</b></div></div>
+    <div class="summary-box">
+      <div class="r"><span>${T("مجموع مساهماته حتى الآن")}</span><b class="num">${money(x.total_paid || 0)}</b>${x.extra_paid ? ` <span class="badge info">${T("منها إضافية")} ${money(x.extra_paid)}</span>` : ''}</div>
+      ${x.left > 0.005 ? `<div class="r"><span>${T("المتبقي عليه حتى هذا الشهر")}</span><b class="num neg-t">${money(x.left)}</b></div>` : ''}
+      <div class="r t"><span>${T("مجموع الأشهر المختارة")}</span><b id="calTot" class="num">0.00</b></div></div>
     <div class="mf"><button class="btn primary" id="calOk" disabled>${icon('check')}${T("تسجيل")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`, { wide: true });
   const sel = new Map(); // month → amount
   const draw = () => {
@@ -476,14 +479,16 @@ function monthsPicker(row, M, now, after) {
   }); };
 }
 function payForm(mid, kind, loanId, label, x) {
-  const left = Math.max(0, Math.round((x.required - x.paid) * 100) / 100);
+  // dues: what is still owed (from the months themselves); a loan: due this month minus what was paid in it
+  const left = Math.max(0, Math.round((x.left !== undefined ? x.left : x.required - x.paid) * 100) / 100);
+  const full = x.left !== undefined ? left <= 0.005 && (x.paid > 0.005 || x.due > 0) : x.paid >= x.required - 0.005 && x.required > 0;
   return `<div class="pay-line">
     <div class="pl-h"><b>${label}</b>
       ${kind === 'installment' ? `<span class="small">${T("القسط الشهري المتفق عليه")} <b class="num">${money(x.installment)}</b></span>` : ''}
       <span class="small">${T("المطلوب")} <b class="num">${money(x.required)}</b>${x.arrears ? ` <span class="neg-t">(${T("منها متأخرات")} ${money(x.arrears)})</span>` : ''}${x.remaining !== undefined ? ` · <span class="muted">${T("المتبقي من القرض")} ${money(x.remaining)}</span>` : ''}</span>
       ${kind === 'installment' && x.ahead_to && x.remaining > 0.005 ? ` <span class="badge info">${T("مسدد مقدّماً حتى")} ${monLabel(x.ahead_to)}</span>` : ''}
       ${kind === 'installment' && !x.covered_to && x.not_started ? ` <span class="badge muted">${T("تبدأ الأقساط")} ${monLabel(x.start_month)}</span>` : ''}
-      <span class="grow"></span>${x.paid >= x.required - 0.005 && x.required > 0 ? `<span class="badge pos">${icon('check')}${T("مكتمل")}</span>` : x.paid > 0 ? `<span class="badge warn">${T("جزئي")}</span>` : ''}${x.extra ? ` <span class="badge info">${T("مساهمة إضافية")} ${money(x.extra)}</span>` : ''}</div>
+      <span class="grow"></span>${full ? `<span class="badge pos">${icon('check')}${T("مكتمل")}</span>` : x.paid > 0 ? `<span class="badge warn">${T("جزئي")}</span>` : ''}${x.extra ? ` <span class="badge info">${T("مساهمة إضافية")} ${money(x.extra)}</span>` : ''}</div>
     ${x.payments.length ? `<div class="chips">${x.payments.map(p => `<span class="chip pay"><a href="#/receipt/${p.id}" title="${T("الإيصال")}">${icon('receipt')}</a>${money(p.amount)}${p.extra ? ` <small>${T("إضافية")}</small>` : ''}${p.for_month && p.for_month !== p.month ? ` <small class="muted">${T("عن")} ${monLabel(p.for_month)}</small>` : ''}${can('fund_manage') || p.created_by === S.me.user.id ? `<button type="button" data-delpay="${p.id}" title="${T("حذف")}">${icon('x')}</button>` : ''}</span>`).join('')}</div>` : ''}
     <form class="pay-f" data-pay="${mid}:${kind}:${loanId || ''}" data-left="${left}" autocomplete="off">
       <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" placeholder="${T("المبلغ المدفوع")}" required ${kind === 'installment' ? `max="${x.remaining}"` : ''}>

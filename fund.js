@@ -197,9 +197,12 @@ module.exports = function mountFund(app, biz, ctx) {
       const pays = d.payments.filter(p => p.member_id === m.id);
       const idx = m.months.findIndex(x => x.m === M);
       const dueM = idx >= 0 ? m.months[idx].due : 0;
-      const duePrev = sum(m.months.filter(x => x.m < M), x => x.due);
-      const paidPrev = sum(pays.filter(p => p.kind === 'dues' && !p.extra && p.month < M), p => p.amount);
-      const dues = { due: dueM, arrears: r2(Math.max(0, duePrev - paidPrev)), required: r2(Math.max(0, dueM + duePrev - paidPrev)),
+      // what is still owed comes from the months themselves (what covers each month), not from when the money was recorded —
+      // so months paid now for the past are not counted as arrears (the same rule as the payments grid and the commitment)
+      const leftOf = (x) => Math.max(0, x.due - x.covered);
+      const arrears = r2(sum(m.months.filter(x => x.m < M && x.due > 0), leftOf));
+      const leftM = idx >= 0 ? r2(leftOf(m.months[idx])) : 0;
+      const dues = { due: dueM, arrears, required: r2(arrears + leftM), left: r2(arrears + leftM), total_paid: m.total_paid, extra_paid: m.extra_paid,
         paid: r2(sum(pays.filter(p => p.kind === 'dues' && !p.extra && p.month === M), p => p.amount)), payments: pays.filter(p => p.kind === 'dues' && p.month === M),
         extra: r2(sum(pays.filter(p => p.kind === 'dues' && p.extra && p.month === M), p => p.amount)),
         open_months: m.months.filter(x => x.m <= M && x.due - x.covered > 0.005).map(x => ({ m: x.m, left: r2(x.due - x.covered) })),
@@ -219,11 +222,13 @@ module.exports = function mountFund(app, biz, ctx) {
       }).filter(l => l.remaining_at > 0.005 || l.paid > 0);
       const active = m.contributing && (!m.left_month || m.left_month >= M) && (!m.join_month || m.join_month <= M);
       if (!active && !loans.length && !dues.paid && dues.required <= 0.005) continue;
+      const loanLeft = (l) => Math.max(0, l.required - l.paid);
       rows.push({ id: m.id, name: m.name, parent: names.get(m.parent_id) || '', dues, loans,
-        done: dues.paid >= dues.required - 0.005 && loans.every(l => l.paid >= l.required - 0.005) });
+        done: dues.left <= 0.005 && loans.every(l => loanLeft(l) <= 0.005) });
     }
+    // still to collect (dues not covered up to this month + installments due) and the money received in this month
     return { month: M, now, start: d.settings.start_month, rows,
-      totals: { required: r2(sum(rows, r => r.dues.required + sum(r.loans, l => l.required))), paid: r2(sum(rows, r => r.dues.paid + sum(r.loans, l => l.paid))), open: rows.filter(r => !r.done).length } };
+      totals: { left: r2(sum(rows, r => r.dues.left + sum(r.loans, l => Math.max(0, l.required - l.paid)))), paid: r2(sum(rows, r => r.dues.paid + r.dues.extra + sum(r.loans, l => l.paid))), open: rows.filter(r => !r.done).length } };
   }));
 
   // dues money is always saved month by month (one receipt each), so every month can later be corrected on its own:
