@@ -65,7 +65,8 @@ module.exports = function mountFund(app, biz, ctx) {
     // a payment the collector tied to a month (for_month) covers that month; all other money (and any excess)
     // fills the oldest unpaid months first — so a month paid late counts as paid, and the months not chosen stay late
     // months still to come may be paid ahead (tied to a month, or money left over after every past month)
-    const tied = new Map(), tiedOnTime = new Map(), freeIn = new Map(), shown = new Map();
+    // money above a month's dues in a payment tied to that month is extra support for that same month (not paid ahead)
+    const tied = new Map(), tiedOnTime = new Map(), freeIn = new Map(), shown = new Map(), over = new Map();
     let lastTied = now;
     for (const p of dues) {
       shown.set(p.month, (shown.get(p.month) || 0) + p.amount);
@@ -75,6 +76,7 @@ module.exports = function mountFund(app, biz, ctx) {
         const t = Math.min(free, Math.max(0, dueOf(p.for_month) - (tied.get(p.for_month) || 0)));
         tied.set(p.for_month, (tied.get(p.for_month) || 0) + t); free -= t;
         if (p.month === p.for_month) tiedOnTime.set(p.month, (tiedOnTime.get(p.month) || 0) + t);
+        if (free > 0.0001) { over.set(p.for_month, (over.get(p.for_month) || 0) + free); free = 0; }
       }
       if (free > 0.0001) freeIn.set(p.month, (freeIn.get(p.month) || 0) + free);
     }
@@ -103,14 +105,19 @@ module.exports = function mountFund(app, biz, ctx) {
     const paidUp = (x) => x.status === 'full' || x.status === 'late'; // a month paid late still counts as paid
     for (const x of closed) { run = paidUp(x) ? 0 : run + 1; maxRun = Math.max(maxRun, run); }
     const late = closed.filter(x => !paidUp(x)).length;
-    const totalPaid = sum(allDues, p => p.amount), extraPaid = sum(allDues.filter(p => p.extra), p => p.amount);
+    const extraIn = new Map(over); // extra support by month: marked extra (the month it was paid in) + the excess of a month-tied payment
+    for (const p of allDues) if (p.extra) extraIn.set(p.month, (extraIn.get(p.month) || 0) + p.amount);
+    const totalPaid = sum(allDues, p => p.amount), extraPaid = sum([...extraIn.values()], v => v);
     const commitment = dueClosed > 0 ? coveredClosed / dueClosed : null;
     const curRow = list.find(x => x.m === now);
     return {
-      months: list.map(x => { const ex = r2(sum(allDues.filter(p => p.extra && p.month === x.m), p => p.amount)); return { ...x, extra: ex, paid: r2(x.paid + ex) }; }),
+      months: list.map(x => ({ ...x, extra: r2(extraIn.get(x.m) || 0), paid: r2(x.paid + sum(allDues.filter(p => p.extra && p.month === x.m), p => p.amount)) })),
       // money paid ahead: recorded dues not yet used by any month
       credit: r2(Math.max(0, (totalPaid - extraPaid) - sum(list, x => x.covered))),
       monthly: r2(rateAt(now)), total_paid: r2(totalPaid), extra_paid: r2(extraPaid),
+      // for the contribution breakdown: the extra contributions by month, and how many months are fully paid
+      extras: [...extraIn].filter(([, v]) => v > 0.004).sort((a, b) => a[0] < b[0] ? -1 : 1).map(([m, amount]) => ({ m, amount: r2(amount) })),
+      paid_months: list.filter(x => x.due > 0 && x.covered >= x.due - 0.005).length,
       arrears: r2(sum(list.filter(x => x.m < now), x => Math.max(0, x.due - x.covered))),
       this_month: curRow ? { due: curRow.due, paid: curRow.paid, remaining: r2(Math.max(0, curRow.due - curRow.covered)), status: curRow.status } : null,
       due_closed: r2(dueClosed), covered_closed: r2(coveredClosed),
@@ -202,7 +209,7 @@ module.exports = function mountFund(app, biz, ctx) {
       const leftOf = (x) => Math.max(0, x.due - x.covered);
       const arrears = r2(sum(m.months.filter(x => x.m < M && x.due > 0), leftOf));
       const leftM = idx >= 0 ? r2(leftOf(m.months[idx])) : 0;
-      const dues = { due: dueM, arrears, required: r2(arrears + leftM), left: r2(arrears + leftM), total_paid: m.total_paid, extra_paid: m.extra_paid,
+      const dues = { due: dueM, arrears, required: r2(arrears + leftM), left: r2(arrears + leftM), total_paid: m.total_paid, extra_paid: m.extra_paid, extras: m.extras, paid_months: m.paid_months, credit: m.credit,
         paid: r2(sum(pays.filter(p => p.kind === 'dues' && !p.extra && p.month === M), p => p.amount)), payments: pays.filter(p => p.kind === 'dues' && p.month === M),
         extra: r2(sum(pays.filter(p => p.kind === 'dues' && p.extra && p.month === M), p => p.amount)),
         open_months: m.months.filter(x => x.m <= M && x.due - x.covered > 0.005).map(x => ({ m: x.m, left: r2(x.due - x.covered) })),
@@ -955,7 +962,7 @@ module.exports = function mountFund(app, biz, ctx) {
     const inMonth = pays.filter(p => p.month === M);
     return { month: M, member: { id: m.id, name: m.name }, due: row.due, status: row.status,
       paid_month: r2(sum(inMonth.filter(p => p.kind === 'dues'), p => p.amount)), installments_month: r2(sum(inMonth.filter(p => p.kind === 'installment'), p => p.amount)),
-      arrears: led.arrears, total_paid: led.total_paid, commitment: led.commitment, rating: led.rating, late_months: led.late_months,
+      arrears: led.arrears, total_paid: led.total_paid, extra_paid: led.extra_paid, extras: led.extras, paid_months: led.paid_months, credit: led.credit, commitment: led.commitment, rating: led.rating, late_months: led.late_months,
       months: led.months.filter(x => x.m <= M).slice(-12), loans,
       payments: inMonth.map(p => ({ id: p.id, no: receiptNo(p.id), kind: p.kind, amount: p.amount, created_at: p.created_at })) };
   }
@@ -1206,7 +1213,7 @@ module.exports = function mountFund(app, biz, ctx) {
     const order = c.members.filter(m => m.contributing || m.total_paid).sort((a, b) => shuffleKey(req.biz.id, a.id, salt) < shuffleKey(req.biz.id, b.id, salt) ? -1 : 1);
     const no = new Map(order.map((m, i) => [m.id, i + 1]));
     const label = (m) => named || own.has(m.id) ? { name: m.name } : { no: no.get(m.id) };
-    const members = order.map(m => ({ ...label(m), mine: own.has(m.id), monthly: m.monthly, total_paid: m.total_paid, share: m.share, commitment: m.commitment,
+    const members = order.map(m => ({ ...label(m), mine: own.has(m.id), monthly: m.monthly, total_paid: m.total_paid, extra_paid: m.extra_paid, paid_months: m.paid_months, credit: m.credit, share: m.share, commitment: m.commitment,
       rating: m.rating, late_months: m.late_months, arrears: m.arrears, left: !!m.left_month })).sort((x, y) => y.total_paid - x.total_paid);
     // families (a head with everyone under them) — named like the people
     const up = (m) => m.spouse_id && c.members.some(q => q.id === m.spouse_id) ? m.spouse_id : m.parent_id; // a wife belongs to her husband's family

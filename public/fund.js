@@ -32,6 +32,35 @@ const RATING = {
 const ratingBadge = (r) => { const [l, c, ic] = RATING[r] || RATING.new; return `<span class="badge ${c}">${icon(ic)}${l}</span>`; };
 const commitBar = (v) => v === null ? '<span class="muted small">—</span>'
   : `<div class="cbar"><div class="progress"><i style="width:${v}%;background:var(--${v >= 95 ? 'pos' : v >= 80 ? 'info' : v >= 60 ? 'warn' : 'neg'})"></i></div><b class="num">${v}%</b></div>`;
+// a member's total contribution, clickable: what came from the months' dues (the base) and what from extra contributions
+const CONTRIB = new Map();
+// a contribution total: click it and the breakdown drops down under it (base dues + extra support)
+function contrib(m, html) {
+  if (CONTRIB.size > 3000) CONTRIB.clear();
+  const k = 'c' + CONTRIB.size; CONTRIB.set(k, m);
+  return `<span class="cdrop"><button type="button" class="contrib-btn" data-contrib="${k}" title="${T("اضغط لعرض تفصيل المساهمة")}">${html || M(m.total ?? m.total_paid)}<span class="caret">▾</span></button></span>`;
+}
+function contribPop(c) {
+  const total = c.total ?? c.total_paid ?? 0, extra = c.extra_sum ?? c.extra_paid ?? 0, base = r2(total - extra), ahead = c.ahead ?? c.credit ?? 0;
+  // the loan limit comes from the whole contribution (base + extra)
+  const fm = S.fund && S.fund.settings && S.fund.settings.loan_multiplier;
+  const lim = c.loan_limit !== undefined ? c.loan_limit : fm && c.total_paid !== undefined ? r2(c.total_paid * fm) : null;
+  return `<div class="cpop">
+    <div><span>${T("مساهمة أساسية")}${c.paid_months !== undefined ? ` <small>(${c.paid_months} ${T("شهر")})</small>` : ''}</span><b class="num">${money(base)}</b></div>
+    ${ahead > 0.005 ? `<div class="sub"><span>${T("منها مدفوع مقدّماً لأشهر قادمة")}</span><span class="num">${money(ahead)}</span></div>` : ''}
+    <div><span>${T("دعم إضافي للصندوق")}</span><b class="num">${money(extra)}</b></div>
+    ${(c.extras || []).map(x => `<div class="sub"><span>${monLabel(x.m)}</span><span class="num">${money(x.amount)}</span></div>`).join('')}
+    ${lim !== null ? `<div class="lim"><span>${T("حد القرض")}</span><b class="num">${money(lim)}</b></div>` : ''}</div>`;
+}
+document.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('[data-contrib]');
+  if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  const w = b.closest('.cdrop'), open = w.querySelector('.cpop');
+  if (open) { open.remove(); w.classList.remove('open'); return; }
+  const c = CONTRIB.get(b.dataset.contrib); if (!c) return;
+  w.insertAdjacentHTML('beforeend', contribPop(c)); w.classList.add('open');
+}, true);
 const fk = (label, value, ic, cls = '', sub = '') => `<div class="kpi ${cls}"><div class="k-ic">${icon(ic)}</div><div class="k-b"><div class="l">${label}</div><div class="v">${value}</div>${sub ? `<div class="small muted">${sub}</div>` : ''}</div></div>`;
 const STATUS_L = { full: T("مدفوع"), ahead: T("مدفوع مقدّماً"), future: T("لم يحن بعد"), late: T("مدفوع متأخراً"), partial: T("جزئي"), missed: T("لم يُدفع"), open: T("الشهر الحالي"), none: T("لا يوجد استحقاق") };
 // last months of a member as small coloured squares
@@ -236,7 +265,7 @@ VIEWS.freport = async (el) => {
     <section class="card"><h3>${icon('users')}${T("مساهمة الأعضاء")}</h3>
       <div class="tbl-wrap"><table class="ftbl"><thead><tr><th>${T("العضو")}</th><th>${T("الشهري")}</th><th>${T("إجمالي المساهمة")}</th><th>${T("نسبة المشاركة")}</th><th>${T("الالتزام")}</th><th>${T("التقييم")}</th></tr></thead><tbody>
       ${r.members.map(m => `<tr class="${m.mine ? 'mine-row' : ''}"><td><b>${pName(m)}</b>${m.mine ? ` <span class="badge info">${T("أنت")}</span>` : ''}${m.left ? ` <span class="badge muted">${T("خرج")}</span>` : ''}</td>
-        <td class="n">${money(m.monthly)}</td><td class="n"><b>${money(m.total_paid)}</b></td>
+        <td class="n">${money(m.monthly)}</td><td class="n"><b>${contrib(m.mine ? m : { ...m, loan_limit: null })}</b></td>
         <td style="min-width:120px"><div class="cbar"><div class="progress"><i style="width:${Math.min(100, m.share * 2)}%;background:var(--brand)"></i></div><b class="num">${m.share}%</b></div></td>
         <td>${commitBar(m.commitment)}</td><td>${ratingBadge(m.rating)}</td></tr>`).join('')}</tbody></table></div></section>
     ${r.families.length > 1 ? `<section class="card"><div class="card-head"><h3>${icon('users')}${T("مساهمة العائلات")}</h3><span class="muted small">${T("كل ابن مع من تحته في الشجرة")}</span></div>
@@ -297,7 +326,7 @@ VIEWS.fund = async (el) => {
     <section class="card"><div class="card-head"><h3>${icon('users')}${T("التزام الأعضاء")}</h3></div>
       <div class="tbl-wrap"><table class="ftbl"><thead><tr><th>${T("الاسم")}</th><th>${T("الشهري")}</th><th>${T("إجمالي المساهمة")}</th><th>${T("المتأخرات")}</th><th>${T("الالتزام")}</th><th>${T("التقييم")}</th></tr></thead><tbody>
       ${active.map(m => `<tr class="clickable" data-m="${m.id}"><td><b>${esc(m.name)}</b>${m.left_month ? ` <span class="badge muted">${T("خرج")}</span>` : ''}</td>
-        <td class="n">${money(m.monthly)}</td><td class="n"><b>${money(m.total_paid)}</b> <span class="muted small">${m.share}%</span></td>
+        <td class="n">${money(m.monthly)}</td><td class="n"><b>${contrib(m)}</b> <span class="muted small">${m.share}%</span></td>
         <td class="n">${m.arrears ? `<b class="neg-t">${money(m.arrears)}</b>` : '<span class="muted">—</span>'}</td>
         <td>${commitBar(m.commitment)}</td><td>${ratingBadge(m.rating)}</td></tr>`).join('') || `<tr><td colspan="6" class="muted center">${T("لا يوجد أعضاء بعد — أضفهم من «شجرة العائلة»")}</td></tr>`}
       </tbody>${active.length ? `<tfoot><tr><td><b>${T("الإجمالي")}</b></td><td class="n">${money(active.filter(m => m.contributing && !m.left_month).reduce((a, m) => a + m.monthly, 0))}</td><td class="n"><b>${money(t.collected)}</b></td><td class="n">${money(active.reduce((a, m) => a + m.arrears, 0))}</td><td colspan="2"></td></tr></tfoot>` : ''}</table></div></section>
@@ -326,7 +355,7 @@ function myCards(d) {
       ${unpaid ? `<div class="banner warn">${icon('alert')}<span class="grow">${T("اشتراك هذا الشهر لم يكتمل بعد")} — ${T("المتبقي")} <b>${money(tm.remaining + m.arrears)}</b></span></div>` : tm && tm.due ? `<div class="banner ok">${icon('check')}<span class="grow">${T("اشتراك هذا الشهر مدفوع، شكراً لالتزامك")}</span></div>` : ''}
       <div class="grid kpis fk">
         ${fk(T("الاشتراك الشهري"), M(m.monthly), 'calendar')}
-        ${fk(m.relation === 'child' ? T("إجمالي ما دفعه") : T("إجمالي ما دفعته"), M(m.total_paid), 'coins', 'pos', `${T("نسبة المشاركة")} ${m.share ?? 0}%`)}
+        ${fk(m.relation === 'child' ? T("إجمالي ما دفعه") : T("إجمالي ما دفعته"), contrib(m), 'coins', 'pos', `${T("نسبة المشاركة")} ${m.share ?? 0}%`)}
         ${fk(T("المتأخرات"), M(m.arrears), 'alert', m.arrears ? 'neg' : '')}
         ${fk(T("نسبة الالتزام"), pct(m.commitment), 'percent', '', `${m.late_months} ${T("شهر متعثر")}`)}
       </div>
@@ -347,7 +376,7 @@ const loanLine = (l) => `<div class="loan-line"><div class="grow"><b>${money(l.a
 async function memberDetail(id) {
   const m = await bapi('/fund/members/' + id);
   const md = modal(m.name, `<div class="row no-print" style="justify-content:flex-end;margin-bottom:8px"><button class="btn sm" data-go="#/statement/${m.id}">${icon('fileText')}${T("الكشف الشهري")}</button><button class="btn sm" id="bStmt">${icon('download')}${T("تنزيل كشف الحساب")}</button></div>
-    <div class="grid kpis fk">${fk(T("الاشتراك الشهري"), M(m.monthly), 'calendar')}${fk(T("إجمالي المساهمة"), M(m.total_paid), 'coins', 'pos', m.extra_paid ? `<span class="small muted">${T("منها إضافية")} ${money(m.extra_paid)}</span>` : '')}${fk(T("المتأخرات"), M(m.arrears), 'alert', m.arrears ? 'neg' : '')}${fk(T("الالتزام"), pct(m.commitment), 'percent', '', ratingBadge(m.rating))}</div>
+    <div class="grid kpis fk">${fk(T("الاشتراك الشهري"), M(m.monthly), 'calendar')}${fk(T("إجمالي المساهمة"), contrib(m), 'coins', 'pos', m.extra_paid ? `<span class="small muted">${T("منها إضافية")} ${money(m.extra_paid)}</span>` : '')}${fk(T("المتأخرات"), M(m.arrears), 'alert', m.arrears ? 'neg' : '')}${fk(T("الالتزام"), pct(m.commitment), 'percent', '', ratingBadge(m.rating))}</div>
     <div class="sec-title">${icon('calendar')}<span class="grow">${T("الأشهر")}</span>${mLegend()}</div>${monthStrip(m.months, 36)}
     ${m.flagged ? `<div class="banner warn">${icon('alert')}<span class="grow">${T("تعثّر")} ${m.max_run >= 3 ? `${m.max_run} ${T("أشهر متتالية")}` : `${m.late_months} ${T("أشهر متفرقة")}`}</span></div>` : ''}
     ${m.loans.length ? `<div class="sec-title">${icon('landmark')}<span class="grow">${T("القروض")}</span></div>${m.loans.map(loanLine).join('')}` : ''}
@@ -457,7 +486,7 @@ function monthsPicker(row, M, now, after) {
       return `<button type="button" class="cal-m ms-${c.status} ${paid ? 'paid' : ''}" data-mo="${mo}" ${paid ? 'disabled' : ''}><span>${monName(mo)}</span><small class="num">${paid ? '✓' : money(c.left || x.monthly).replace('.00', '')}</small></button>`; }).join('')}</div></div>`).join('')}
     <div id="calSel" class="cal-sel"></div>
     <div class="summary-box">
-      <div class="r"><span>${T("مجموع مساهماته حتى الآن")}</span><b class="num">${money(x.total_paid || 0)}</b>${x.extra_paid ? ` <span class="badge info">${T("منها إضافية")} ${money(x.extra_paid)}</span>` : ''}</div>
+      <div class="r"><span>${T("مجموع مساهماته حتى الآن")}</span><b>${contrib(x)}</b>${x.extra_paid ? ` <span class="badge info">${T("منها إضافية")} ${money(x.extra_paid)}</span>` : ''}</div>
       ${x.left > 0.005 ? `<div class="r"><span>${T("المتبقي عليه حتى هذا الشهر")}</span><b class="num neg-t">${money(x.left)}</b></div>` : ''}
       <div class="r t"><span>${T("مجموع الأشهر المختارة")}</span><b id="calTot" class="num">0.00</b></div></div>
     <div class="mf"><button class="btn primary" id="calOk" disabled>${icon('check')}${T("تسجيل")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`, { wide: true });
@@ -513,6 +542,12 @@ const collectRow = (r) => `<section class="card c-row ${r.done ? 'done' : ''}">
   ${r.loans.map(l => payForm(r.id, 'installment', l.id, `${T("قسط القرض")} (${money(l.amount)})`, l)).join('')}</section>`;
 
 /* ───────────── payments grid (members × months) ───────────── */
+// one member's year in the grid: what came in for that year's months, the extra support, and what is already paid for later years
+const yearOf = (m, months, by, later) => {
+  const extras = months.map(s => by.get(s.m)).filter(x => x && x.extra > 0.004).map(x => ({ m: x.m, amount: x.extra }));
+  const extra = r2(extras.reduce((a, x) => a + x.amount, 0));
+  return { name: m.name, total: r2(months.reduce((a, s) => a + (by.get(s.m)?.covered || 0), 0) + extra + later), extra_sum: extra, extras, ahead: later, loan_limit: null };
+};
 VIEWS.flow = async (el, [year]) => {
   const d = S.fund && S.fund.full && year ? S.fund : await bapi('/fund/overview');
   S.fund = d;
@@ -535,10 +570,9 @@ VIEWS.flow = async (el, [year]) => {
       const tip = (x) => `${STATUS_L[x.status]}: ${money(x.covered)} / ${money(x.due)}${x.paid ? ` — ${T("المستلم في هذا الشهر")} ${money(x.paid)}` : ''}`;
       // this year's total also tells what is already paid for the years after it
       const later = y === d.now.slice(0, 4) ? r2(m.months.filter(x => x.m.slice(0, 4) > y).reduce((a, x) => a + x.covered, 0) + (m.credit || 0)) : 0;
-      const credit = later > 0.005 ? `<div class="small muted">+ ${T("مقدّم لما بعد هذه السنة")} ${money(later)}</div>` : '';
       const fut = (mo) => m.contributing && !m.left_month && (!m.join_month || m.join_month <= mo) ? { m: mo, due: m.monthly, covered: 0, paid: 0, extra: 0, status: 'future' } : null;
       return `<tr><td><b>${esc(m.name)}</b></td><td class="n muted">${money(m.monthly)}</td>${months.map(s => { const x = by.get(s.m) || (s.future ? fut(s.m) : null); return x ? `<td class="fc ${x.status} ${edit ? 'ed' : ''}" title="${tip(x)}" ${edit ? `data-cell="${m.id}:${x.m}"` : ''}>${cell(x)}</td>` : '<td class="fc none"></td>'; }).join('')}
-        <td class="n"><b>${money(months.reduce((a, s) => a + (by.get(s.m)?.covered || 0) + (by.get(s.m)?.extra || 0), 0) + later)}</b>${credit}</td></tr>`;
+        <td class="n"><b>${contrib(yearOf(m, months, by, later))}</b></td></tr>`;
     }).join('')}
     </tbody><tfoot>
       <tr><td colspan="2"><b>${T("المحصّل فعلياً في الشهر")}</b></td>${months.map(s => `<td class="n">${s.future ? '' : `<b>${money(s.income).replace('.00', '')}</b>`}</td>`).join('')}<td class="n"><b>${money(months.reduce((a, s) => a + s.income, 0))}</b></td></tr>
@@ -698,7 +732,7 @@ VIEWS.members = async (el, _, keep) => {
       <div><b>${esc(m.name)}</b><div class="small muted">${m.deceased ? (wife ? T("رحمها الله") : T("رحمه الله")) : known(m) ? NODE_L[nodeState(m)] : T("عضو في الصندوق")}${rel}</div></div></div>`;
     if (!known(m)) return head + (ch.length ? `<p class="small muted">${ch.length} ${T("من الأبناء في الشجرة")}</p>` : '');
     const rows = m.contributing ? [
-      [T("الاشتراك الشهري"), money(m.monthly)], [T("إجمالي المساهمة"), `<b>${money(m.total_paid)}</b>`],
+      [T("الاشتراك الشهري"), money(m.monthly)], [T("إجمالي المساهمة"), `<b>${contrib(m)}</b>`],
       [T("المتأخرات"), m.arrears ? `<b class="neg-t">${money(m.arrears)}</b>` : '—'], [T("أشهر التعثر"), m.late_months || '—'],
       [T("الالتزام"), `${pct(m.commitment)} ${ratingBadge(m.rating)}`],
     ] : [[T("الحالة"), m.deceased ? T("رحمه الله") : T("غير مشترك")]];
@@ -1582,7 +1616,7 @@ VIEWS.statement = async (el, [id, month]) => {
           ${fk(T("المطلوب هذا الشهر"), M(s.due), 'calendar')}
           ${fk(T("المدفوع هذا الشهر"), M(s.paid_month), 'check', 'pos')}
           ${fk(T("المتأخرات"), M(s.arrears), 'alert', s.arrears ? 'neg' : '')}
-          ${fk(T("إجمالي مساهمتك"), M(s.total_paid), 'coins', 'accent')}
+          ${fk(T("إجمالي مساهمتك"), contrib(s), 'coins', 'accent')}
         </div>
       </div>
       <div class="st-sec"><div class="sec-title">${icon('calendar')}<span class="grow">${T("آخر 12 شهراً")}</span>${mLegend()}</div>${monthStrip(s.months, 12)}</div>
