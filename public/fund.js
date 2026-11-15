@@ -408,7 +408,19 @@ VIEWS.collect = async (el, [month]) => {
     const drawExtra = () => { if (!xb) return; const o = over(); xb.hidden = !(o > 0.005); $('.px-amt', xb).textContent = money(Math.max(0, o)); };
     f.addEventListener('input', drawExtra); drawExtra();
     f.addEventListener('input', drawMonths); if (box) box.addEventListener('change', drawMonths);
-    $('[data-full]', f).onclick = () => { f.amount.value = f.dataset.left; f.amount.focus(); drawMonths(); };
+    if ($('[data-full]', f)) $('[data-full]', f).onclick = () => { f.amount.value = f.dataset.left; f.amount.focus(); drawMonths(); f.dispatchEvent(new Event('input')); };
+    $$('[data-fillv]', f).forEach(b => b.onclick = () => { f.amount.value = b.dataset.fillv; f.amount.focus(); f.dispatchEvent(new Event('input')); });
+    const inote = $('.inst-note', f);
+    if (inote) {
+      const drawInst = () => {
+        const a = Number(f.amount.value) || 0, need = Number(f.dataset.left), rem = Number(inote.dataset.rem);
+        inote.innerHTML = !a ? '' : a > rem + 0.005 ? `<span class="neg-t">${T("المبلغ أكبر من المتبقي من القرض")} (${money(rem)})</span>`
+          : Math.abs(a - rem) < 0.005 ? `<span class="pos-t">${T("يُغلق القرض بالكامل ✓")}</span>`
+          : a > need + 0.005 ? `<span class="muted">${need > 0.005 ? `${T("المطلوب")} ${money(need)} + ` : ''}${money(r2(a - need))} ${T("منها مقدّماً لأقساط قادمة")}</span>`
+          : a < need - 0.005 ? `<span class="warn-t">${T("جزئي")} — ${T("يبقى من المطلوب")} ${money(r2(need - a))}</span>` : '';
+      };
+      f.addEventListener('input', drawInst); drawInst();
+    }
     const cb = $('[data-cal]', f);
     if (cb) cb.onclick = () => { const row = d.rows.find(r => r.id === Number(mid)); monthsPicker(row, d.month, d.now, reload); };
     f.onsubmit = (e) => {
@@ -467,14 +479,20 @@ function payForm(mid, kind, loanId, label, x) {
   const left = Math.max(0, Math.round((x.required - x.paid) * 100) / 100);
   return `<div class="pay-line">
     <div class="pl-h"><b>${label}</b>
+      ${kind === 'installment' ? `<span class="small">${T("القسط الشهري المتفق عليه")} <b class="num">${money(x.installment)}</b></span>` : ''}
       <span class="small">${T("المطلوب")} <b class="num">${money(x.required)}</b>${x.arrears ? ` <span class="neg-t">(${T("منها متأخرات")} ${money(x.arrears)})</span>` : ''}${x.remaining !== undefined ? ` · <span class="muted">${T("المتبقي من القرض")} ${money(x.remaining)}</span>` : ''}</span>
+      ${kind === 'installment' && x.ahead_to && x.remaining > 0.005 ? ` <span class="badge info">${T("مسدد مقدّماً حتى")} ${monLabel(x.ahead_to)}</span>` : ''}
+      ${kind === 'installment' && !x.covered_to && x.not_started ? ` <span class="badge muted">${T("تبدأ الأقساط")} ${monLabel(x.start_month)}</span>` : ''}
       <span class="grow"></span>${x.paid >= x.required - 0.005 && x.required > 0 ? `<span class="badge pos">${icon('check')}${T("مكتمل")}</span>` : x.paid > 0 ? `<span class="badge warn">${T("جزئي")}</span>` : ''}${x.extra ? ` <span class="badge info">${T("مساهمة إضافية")} ${money(x.extra)}</span>` : ''}</div>
     ${x.payments.length ? `<div class="chips">${x.payments.map(p => `<span class="chip pay"><a href="#/receipt/${p.id}" title="${T("الإيصال")}">${icon('receipt')}</a>${money(p.amount)}${p.extra ? ` <small>${T("إضافية")}</small>` : ''}${p.for_month && p.for_month !== p.month ? ` <small class="muted">${T("عن")} ${monLabel(p.for_month)}</small>` : ''}${can('fund_manage') || p.created_by === S.me.user.id ? `<button type="button" data-delpay="${p.id}" title="${T("حذف")}">${icon('x')}</button>` : ''}</span>`).join('')}</div>` : ''}
     <form class="pay-f" data-pay="${mid}:${kind}:${loanId || ''}" data-left="${left}" autocomplete="off">
-      <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" placeholder="${T("المبلغ المدفوع")}" required>
-      <button type="button" class="btn sm" data-full ${left ? '' : 'disabled'}>${T("كامل")} ${left ? money(left) : ''}</button>
+      <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" placeholder="${T("المبلغ المدفوع")}" required ${kind === 'installment' ? `max="${x.remaining}"` : ''}>
+      ${kind !== 'installment' || left ? `<button type="button" class="btn sm" data-full ${left ? '' : 'disabled'}>${T("كامل")} ${left ? money(left) : ''}</button>` : ''}
+      ${kind === 'installment' ? [1, 2, 3].filter(n => (n - 1) * x.installment < x.remaining - 0.005).map(n => `<button type="button" class="btn sm ghost" data-fillv="${r2(Math.min(n * x.installment, x.remaining))}">${n === 1 ? T("قسط واحد") : n === 2 ? T("قسطان") : T("3 أقساط")}</button>`).join('')
+        + (x.remaining > 0.005 ? `<button type="button" class="btn sm ghost" data-fillv="${x.remaining}">${T("كامل المتبقي")} ${money(x.remaining)}</button>` : '') : ''}
       ${kind === 'dues' ? `<button type="button" class="btn sm" data-cal title="${T("اختيار الأشهر من التقويم")}">${icon('calendar')}${T("الأشهر")}</button>` : ''}
       <button class="btn sm primary">${icon('check')}${T("تسجيل")}</button>
+      ${kind === 'installment' ? `<div class="small inst-note" data-rem="${x.remaining}"></div>` : ''}
       ${kind === 'dues' ? `<div class="pay-extra" hidden><div class="small"><b>${T("المبلغ أكبر من المطلوب بـ")} <span class="px-amt num"></span></b> — ${T("ماذا نفعل بالزيادة؟")}</div>
         <label class="check"><input type="radio" name="px${mid}" value="extra" checked> ${T("مساهمة إضافية")}</label>
         <div class="muted small" style="margin:-4px 0 2px;padding-inline-start:26px">${T("(تزيد مساهماته وأحقيته في القرض، ويبقى عليه اشتراك الشهور القادمة)")}</div>

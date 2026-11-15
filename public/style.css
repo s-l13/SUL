@@ -918,3 +918,14 @@ tr.mine-row td { background: var(--brand-soft); }
 .cal-sel { display: grid; gap: 6px; margin: 10px 0; }
 .cal-row { display: grid; grid-template-columns: 1fr 120px auto; align-items: center; gap: 8px; margin: 0; }
 .m-set input { font-size: 18px; font-weight: 700; }
+/* recurring expenses */
+.rec-box .sec-title { margin-bottom: 10px; }
+.rec-list { display: grid; gap: 8px; }
+.rec-item { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); border-inline-start: 4px solid var(--border); background: var(--surface); }
+.rec-item.overdue { border-inline-start-color: var(--neg); }
+.rec-item.soon { border-inline-start-color: var(--warn); }
+.rec-item.off { opacity: .6; }
+.rec-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.rec-acts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rec-acts .grow { flex: 1; }
+.rec-main .num { white-space: nowrap; unicode-bidi: isolate; }

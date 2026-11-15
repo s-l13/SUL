@@ -7,7 +7,7 @@
 // (paying the arrears later reduces what is owed but the late month stays counted as late).
 
 const FUND_PERMS = {
-  fund_collect: 'تسجيل الدفعات الشهرية (المحصّل)',
+  fund_collect: 'تحصيل الاشتراكات الشهرية وأقساط القروض (المحصّل)',
   fund_view_all: 'رؤية التزام جميع الأعضاء والتقارير الكاملة',
   fund_manage: 'إدارة الصندوق (الأعضاء، الشجرة، المبالغ، القروض، الإعدادات)',
 };
@@ -204,13 +204,19 @@ module.exports = function mountFund(app, biz, ctx) {
         extra: r2(sum(pays.filter(p => p.kind === 'dues' && p.extra && p.month === M), p => p.amount)),
         open_months: m.months.filter(x => x.m <= M && x.due - x.covered > 0.005).map(x => ({ m: x.m, left: r2(x.due - x.covered) })),
         monthly: m.monthly, cal: m.months.filter(x => x.due > 0).map(x => ({ m: x.m, due: x.due, left: r2(Math.max(0, x.due - x.covered)), status: x.status })) };
-      const loans = d.loans.filter(l => l.member_id === m.id && l.start_month <= M && l.issued_date.slice(0, 7) <= M).map(l => {
+      // every loan still open in that month: its installment as agreed, arrears, and how far it is paid (paying ahead / several months / all of it)
+      const loans = d.loans.filter(l => l.member_id === m.id && l.issued_date.slice(0, 7) <= M).map(l => {
         const lp = pays.filter(p => p.kind === 'installment' && p.loan_id === l.id);
         const paidBefore = sum(lp.filter(p => p.month < M), p => p.amount);
-        const expected = Math.min(l.amount, l.installment * monthsBetween(l.start_month, M).length);
-        return { id: l.id, amount: l.amount, installment: l.installment, required: r2(Math.max(0, Math.min(expected, l.amount) - paidBefore)),
-          paid: r2(sum(lp.filter(p => p.month === M), p => p.amount)), remaining: r2(Math.max(0, l.amount - sum(lp, p => p.amount))), payments: lp.filter(p => p.month === M) };
-      }).filter(l => l.required > 0.005 || l.paid > 0);
+        const paidTo = sum(lp.filter(p => p.month <= M), p => p.amount);
+        const upTo = (mo) => l.start_month <= mo ? Math.min(l.amount, l.installment * monthsBetween(l.start_month, mo).length) : 0;
+        const covered = Math.floor((paidTo + 0.005) / l.installment);
+        return { id: l.id, amount: l.amount, installment: l.installment, start_month: l.start_month,
+          required: r2(Math.max(0, upTo(M) - paidBefore)), arrears: r2(Math.max(0, upTo(prevMonth(M)) - paidBefore)),
+          paid: r2(sum(lp.filter(p => p.month === M), p => p.amount)), remaining: r2(Math.max(0, l.amount - sum(lp, p => p.amount))),
+          remaining_at: r2(Math.max(0, l.amount - paidTo)), not_started: l.start_month > M, covered_to: covered > 0 ? addMonths(l.start_month, covered - 1) : null,
+          ahead_to: covered > 0 && addMonths(l.start_month, covered - 1) > M ? addMonths(l.start_month, covered - 1) : null, payments: lp.filter(p => p.month === M) };
+      }).filter(l => l.remaining_at > 0.005 || l.paid > 0);
       const active = m.contributing && (!m.left_month || m.left_month >= M) && (!m.join_month || m.join_month <= M);
       if (!active && !loans.length && !dues.paid && dues.required <= 0.005) continue;
       rows.push({ id: m.id, name: m.name, parent: names.get(m.parent_id) || '', dues, loans,

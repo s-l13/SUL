@@ -813,7 +813,11 @@ biz.get('/summary', need('balance_view'), wrap(async (req) => {
   const debts = await debtsAsOf(b.id, MAX_DATE);
   const os = await openShift(b.id);
   const series = await dailySeries(b, addDays(t, -6), t);
+  remindRecurring(b.id).catch(e => console.error('reminders failed:', e.message));
+  const rec = (await db.all('SELECT id, name, amount, next_due, remind_days, active FROM recurring_expenses WHERE business_id = ? AND active = 1 AND deleted_at IS NULL ORDER BY next_due', b.id))
+    .map(r => ({ ...r, ...recStatus(r, t) })).filter(r => r.status !== 'later');
   return {
+    recurring_due: rec,
     balance, receivables, debts, net_position: r2(balance - debts.total),
     today: await movement(b, t, t), month: await movement(b, t.slice(0, 8) + '01', t),
     openShift: os ? { ...os, opened_by_name: (await db.get('SELECT name FROM users WHERE id = ?', os.opened_by))?.name } : null,
@@ -1216,8 +1220,130 @@ biz.delete('/transactions/:id', wrap(async (req) => {
   return { ok: true };
 }));
 
+// ---------- recurring expenses: salary every month, something every few months, a yearly fee ----------
+// each one has its next due date; a reminder goes out before it, and "paid" records the expense from the company account
+// and moves the due date one cycle forward.
+const pad2 = (n) => String(n).padStart(2, '0');
+// n months after date d, on day `day` of that month (31 → the last day of a shorter month)
+function monthsAfter(d, n, day) {
+  let y = Number(d.slice(0, 4)), m = Number(d.slice(5, 7)) - 1 + n;
+  y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+  const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return `${y}-${pad2(m + 1)}-${pad2(Math.min(day, last))}`;
+}
+const daysBetween = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5);
+const REC_FIELDS = ['name', 'amount', 'category_id', 'every', 'next_due', 'remind_days', 'active', 'note'];
+async function recClean(req, x, prev = {}) {
+  const v = (k) => x[k] !== undefined ? x[k] : prev[k];
+  const name = String(v('name') || '').trim().slice(0, 200);
+  if (!name) bad('الاسم مطلوب');
+  const amount = r2(num(v('amount')));
+  if (!(amount > 0)) bad('المبلغ يجب أن يكون أكبر من صفر');
+  const every = Math.round(num(v('every')));
+  if (!(every >= 1 && every <= 60)) bad('الدورة يجب أن تكون بين شهر و60 شهراً');
+  const next_due = v('next_due');
+  if (!isDate(next_due)) bad('اختر تاريخ الاستحقاق');
+  const rd = v('remind_days') === undefined || v('remind_days') === '' ? 3 : Math.round(num(v('remind_days')));
+  if (!(rd >= 0 && rd <= 60)) bad('أيام التذكير يجب أن تكون بين 0 و60');
+  let category_id = null;
+  if (idOf(v('category_id'))) {
+    const c = await db.get("SELECT id FROM categories WHERE id = ? AND business_id = ? AND kind = 'expense'", idOf(v('category_id')), req.biz.id);
+    if (!c) bad('التصنيف غير صحيح');
+    category_id = c.id;
+  }
+  const active = v('active') === undefined ? 1 : (v('active') ? 1 : 0);
+  const note = String(v('note') || '').trim().slice(0, 500) || null;
+  return { name, amount, category_id, every, next_due, remind_days: rd, active, note };
+}
+const recSnap = (r) => Object.fromEntries(REC_FIELDS.map(f => [f, r[f]]));
+async function getRec(req) {
+  const r = await db.get('SELECT * FROM recurring_expenses WHERE id = ? AND business_id = ? AND deleted_at IS NULL', idOf(req.params.id), req.biz.id);
+  if (!r) throw new HttpError(404, 'غير موجود');
+  return r;
+}
+const recStatus = (r, t) => { const d = daysBetween(t, r.next_due); return { days: d, status: !r.active ? 'paused' : d < 0 ? 'overdue' : d <= r.remind_days ? 'soon' : 'later' }; };
+
+biz.get('/recurring', need('balance_view', 'tx_view_all', 'finance_manage'), wrap(async (req) => {
+  const t = await dayNow(req.biz);
+  const rows = await db.all(`SELECT r.*, c.name category_name FROM recurring_expenses r LEFT JOIN categories c ON c.id = r.category_id
+    WHERE r.business_id = ? AND r.deleted_at IS NULL ORDER BY r.active DESC, r.next_due, r.id`, req.biz.id);
+  return { today: t, items: rows.map(r => ({ ...r, ...recStatus(r, t) })) };
+}));
+biz.post('/recurring', need('finance_manage', 'settings_manage'), wrap(async (req) => {
+  const o = await recClean(req, req.body || {});
+  const id = await db.insert(`INSERT INTO recurring_expenses (business_id, name, amount, category_id, every, next_due, due_day, remind_days, active, note, created_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`, req.biz.id, o.name, o.amount, o.category_id, o.every, o.next_due, Number(o.next_due.slice(8, 10)), o.remind_days, o.active, o.note, req.user.id);
+  await audit(req.biz.id, req.user.id, 'recurring_create', { id, after: o });
+  remindRecurring(req.biz.id).catch(() => { });
+  return { id };
+}));
+biz.put('/recurring/:id', need('finance_manage', 'settings_manage'), wrap(async (req) => {
+  const prev = await getRec(req);
+  const o = await recClean(req, req.body || {}, prev);
+  // a new due date (or a smaller reminder window) may need a new reminder
+  const renotify = o.next_due !== prev.next_due || o.remind_days !== prev.remind_days;
+  await db.run(`UPDATE recurring_expenses SET name=?, amount=?, category_id=?, every=?, next_due=?, due_day=?, remind_days=?, active=?, note=?${renotify ? ', notified_for = NULL' : ''} WHERE id = ?`,
+    o.name, o.amount, o.category_id, o.every, o.next_due, o.next_due !== prev.next_due ? Number(o.next_due.slice(8, 10)) : prev.due_day, o.remind_days, o.active, o.note, prev.id);
+  await audit(req.biz.id, req.user.id, 'recurring_update', { id: prev.id, before: recSnap(prev), after: o });
+  remindRecurring(req.biz.id).catch(() => { });
+  return { ok: true };
+}));
+biz.delete('/recurring/:id', need('finance_manage', 'settings_manage'), wrap(async (req) => {
+  const r = await getRec(req);
+  await db.run('UPDATE recurring_expenses SET deleted_at = ? WHERE id = ?', nowLocal(), r.id);
+  await audit(req.biz.id, req.user.id, 'recurring_delete', { id: r.id, before: recSnap(r) });
+  return { ok: true };
+}));
+// paid: an expense from the company account (its amount may differ this time), then the next cycle
+biz.post('/recurring/:id/pay', need('finance_manage'), wrap(async (req) => {
+  const r = await getRec(req);
+  const x = req.body || {};
+  const t = await dayNow(req.biz);
+  const date = isDate(x.date) ? x.date : t;
+  if (date > t) bad('تاريخ السداد لا يمكن أن يكون في المستقبل');
+  const amount = x.amount === undefined || x.amount === '' ? r.amount : num(x.amount);
+  const next = monthsAfter(r.next_due, r.every, r.due_day);
+  const desc = `${r.name} — ${r.next_due}${x.note ? ' — ' + String(x.note).trim().slice(0, 300) : ''}`;
+  const id = await db.tx(async () => {
+    const tx = await validateTx(req, { type: 'expense', payment_method: 'company', amount, category_id: r.category_id, description: desc, date });
+    const id = await insertTx(req, tx);
+    await db.run('UPDATE recurring_expenses SET next_due = ?, notified_for = NULL, last_paid = ?, last_amount = ? WHERE id = ?', next, date, tx.amount, r.id);
+    return id;
+  });
+  await audit(req.biz.id, req.user.id, 'recurring_pay', { id: r.id, name: r.name, amount: r2(amount), due: r.next_due, date, next_due: next, tx_id: id });
+  remindRecurring(req.biz.id).catch(() => { });
+  return { ok: true, tx_id: id, next_due: next };
+}));
+// not paid this time (e.g. no salary that month): move to the next cycle without recording anything
+biz.post('/recurring/:id/skip', need('finance_manage'), wrap(async (req) => {
+  const r = await getRec(req);
+  const next = monthsAfter(r.next_due, r.every, r.due_day);
+  await db.run('UPDATE recurring_expenses SET next_due = ?, notified_for = NULL WHERE id = ?', next, r.id);
+  await audit(req.biz.id, req.user.id, 'recurring_skip', { id: r.id, name: r.name, due: r.next_due, next_due: next });
+  remindRecurring(req.biz.id).catch(() => { });
+  return { ok: true, next_due: next };
+}));
+// reminders: once per due date, `remind_days` before it (or as soon as it is found late), to whoever runs the finances
+async function remindRecurring(onlyBid) {
+  const bs = await db.all("SELECT * FROM businesses WHERE active = 1 AND kind != 'fund'" + (onlyBid ? ' AND id = ?' : ''), ...(onlyBid ? [onlyBid] : []));
+  for (const b of bs) {
+    const t = await dayNow(b);
+    const due = (await db.all('SELECT * FROM recurring_expenses WHERE business_id = ? AND active = 1 AND deleted_at IS NULL', b.id))
+      .filter(r => r.notified_for !== r.next_due && daysBetween(t, r.next_due) <= r.remind_days);
+    if (!due.length) continue;
+    const to = await usersWith(b.id, ['finance_manage']);
+    for (const r of due) {
+      const d = daysBetween(t, r.next_due);
+      const title = d < 0 ? 'متأخر: سداد «{name}» كان مستحقاً في {date} — {amount}' : d === 0 ? 'اليوم موعد سداد «{name}»: {amount}' : 'تذكير: موعد سداد «{name}» في {date} — {amount}';
+      await notifyUsers(to, b.id, 'recurring_due', title, { name: r.name, date: r.next_due, amount: r.amount }, '#/expenses');
+      await db.run('UPDATE recurring_expenses SET notified_for = ? WHERE id = ?', r.next_due, r.id);
+    }
+  }
+}
+app.locals.remindRecurring = remindRecurring;
+
 // ---------- edits log ----------
-const EDIT_ACTIONS = [...mountFund.FUND_EDIT_ACTIONS, 'tx_update', 'tx_delete', 'shift_edit', 'shift_reopen', 'cash_receive', 'settings_update', 'apps_update', 'categories_update', 'creditors_update', 'creditors_delete', 'logo_update'];
+const EDIT_ACTIONS = [...mountFund.FUND_EDIT_ACTIONS, 'recurring_update', 'recurring_delete', 'recurring_skip', 'tx_update', 'tx_delete', 'shift_edit', 'shift_reopen', 'cash_receive', 'settings_update', 'apps_update', 'categories_update', 'creditors_update', 'creditors_delete', 'logo_update'];
 biz.get('/audit', need('audit_view'), wrap(async (req) => {
   const to = isDate(req.query.to) ? req.query.to : today();
   const from = isDate(req.query.from) ? req.query.from : addDays(to, -30);
@@ -1351,6 +1477,9 @@ db.init().then(adminRecovery).then(() => {
   // monthly statements of the family fund: checked soon after start, then every hour
   const stmt = () => app.locals.fundStatements().catch(e => console.error('statements failed:', e.message));
   setTimeout(stmt, 20e3); setInterval(stmt, 3600e3);
+  // reminders of recurring expenses (salary, rent, yearly fees): checked soon after start, then every hour
+  const rem = () => app.locals.remindRecurring().catch(e => console.error('reminders failed:', e.message));
+  setTimeout(rem, 25e3); setInterval(rem, 3600e3);
   if (db.dialect === 'sqlite' && !process.env.DB_PATH) { setTimeout(dailyBackup, 15e3); setInterval(dailyBackup, 3600e3); } // DB_PATH is only set by tests
   app.listen(PORT, HOST, () => {
     console.log(`\n  النظام يعمل الآن (${db.dialect === 'pg' ? 'PostgreSQL' : 'SQLite'}):`);

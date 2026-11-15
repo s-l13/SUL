@@ -421,7 +421,7 @@ async function openBell() {
   p.className = 'npanel';
   p.innerHTML = `<div class="np-h"><b>${T("التنبيهات")}</b>${d.unread ? `<button class="btn sm ghost" data-all>${T("تحديد الكل كمقروء")}</button>` : ''}</div>
     <div class="np-list">${d.items.length ? d.items.map(n => `<button type="button" class="np-item ${n.read_at ? '' : 'new'}" data-n="${n.id}">
-      <span class="np-ic">${icon(n.kind === 'fund_receipt' ? 'receipt' : n.kind === 'fund_statement' ? 'fileText' : n.kind === 'fund_gift' ? 'heart' : n.kind === 'pw_reset' ? 'key' : /rejected|report_reject/.test(n.kind) ? 'x' : /approved|report_approve/.test(n.kind) ? 'check' : n.kind === 'report_requested' ? 'eye' : 'hand')}</span>
+      <span class="np-ic">${icon(n.kind === 'fund_receipt' ? 'receipt' : n.kind === 'fund_statement' ? 'fileText' : n.kind === 'fund_gift' ? 'heart' : n.kind === 'pw_reset' ? 'key' : n.kind === 'recurring_due' ? 'clock' : /rejected|report_reject/.test(n.kind) ? 'x' : /approved|report_approve/.test(n.kind) ? 'check' : n.kind === 'report_requested' ? 'eye' : 'hand')}</span>
       <span class="np-t"><span>${fillT(n.title, n.vars)}</span>${n.vars && n.vars.note ? `<small class="muted">${esc(n.vars.note)}</small>` : ''}
         <small class="muted">${n.business_name ? esc(T(n.business_name)) + ' · ' : ''}${n.created_at.slice(0, 16)}</small></span></button>`).join('')
       : `<div class="empty small">${T("لا توجد تنبيهات")}</div>`}</div>`;
@@ -711,6 +711,7 @@ VIEWS.home = async (el) => {
   ${pageHead('home', esc(T(S.meta.business.name)), fmtDate(wd()), `<a class="btn primary" href="#/shift">${icon('receipt')}${T("المشتريات والإقفال")}</a>`)}
   ${d.openShift ? `<div class="banner info">${icon('clock')}<span class="grow">${T("يوم العمل الحالي لم يُقفل بعد")} — <span class="small">${T("مبيعاته تُحتسب عند الإقفال")}</span></span></div>` : ''}
   ${(d.stale_open || []).map(s => `<div class="banner warn">${icon('alert')}<span class="grow">${T("يوم")} <b>${fmtDate(s.date)}</b> ${T("لم يُقفل — الكاشير انتقل لليوم الحالي. أدخل أرقام إقفاله من «أيام سابقة»")}</span>${can('past_days') ? `<a class="btn sm" href="#/shift" onclick="vCashier.day='${s.date}'">${T("إقفاله الآن")}</a>` : ''}</div>`).join('')}
+  ${(d.recurring_due || []).map(r => `<div class="banner ${r.status === 'overdue' ? 'err' : 'warn'}">${icon('clock')}<span class="grow">${r.status === 'overdue' ? T("متأخر:") : T("مستحق:")} <b>${esc(r.name)}</b> ${money(r.amount)} — ${fmtDate(r.next_due)} <span class="small">(${recWhen(r)})</span></span><a class="btn sm" href="#/expenses">${can('finance_manage') ? T("سداد") : T("عرض")}</a></div>`).join('')}
   ${d.pending_cash ? `<div class="banner warn">${icon('cash')}<span class="grow">${T("يوجد")} <b>${d.pending_cash}</b> ${T("إقفال بانتظار استلام النقد من الكاشير")}</span><a class="btn sm" href="#/shifts">${T("استلام الآن")}</a></div>` : ''}
   <div class="grid kpis">
     ${kpi(T("رصيد الشركة الآن"), d.balance, 'accent', '', 'wallet')}
@@ -1017,6 +1018,7 @@ VIEWS.expenses = async (el) => {
   const canAdd = can('finance_manage') || can('purchases_add');
   const cats = S.meta.categories.filter(c => c.kind === 'expense');
   el.innerHTML = `${pageHead('fileText', T("المصروفات"), T("الرواتب والإيجار والكهرباء وغيرها"), `${canAdd ? `<button class="btn primary" id="bNewExp">${icon('plus')}${T("مصروف جديد")}</button>` : ''}`)}
+    <section class="card rec-box" id="recBox"></section>
     <section class="card"><form id="fE" class="fgrid">
       <label>${T("من")}<input type="date" name="from" value="${st.from}"></label><label>${T("إلى")}<input type="date" name="to" value="${st.to}"></label>
       <label>${T("التصنيف")}<select name="category_id"><option value="">${T("الكل")}</option>${opt(cats, st.category_id)}</select></label>
@@ -1047,8 +1049,82 @@ VIEWS.expenses = async (el) => {
   };
   $('#fE').onchange = () => load().catch(fail);
   if ($('#bNewExp')) $('#bNewExp').onclick = () => openTxModal({ types: ['expense'], title: T("مصروف جديد"), onSaved: load });
-  await load();
+  await Promise.all([load(), recurringBox($('#recBox'), load)]);
 };
+
+/* ───── recurring expenses: salary monthly, something every few months, a yearly fee — reminded, paid from the company account ───── */
+const everyL = (n) => ({ 1: T("شهرياً"), 2: T("كل شهرين"), 3: T("كل 3 أشهر"), 4: T("كل 4 أشهر"), 6: T("كل 6 أشهر"), 12: T("سنوياً"), 24: T("كل سنتين") })[n] || `${T("كل")} ${n} ${T("أشهر")}`;
+const REC_ST = { overdue: [T("متأخر"), 'neg'], soon: [T("مستحق قريباً"), 'warn'], later: [T("قادم"), 'muted'], paused: [T("موقوف"), 'muted'] };
+const recWhen = (r) => r.days < 0 ? `${T("متأخر")} ${-r.days} ${T("يوم")}` : r.days === 0 ? T("اليوم") : `${T("بعد")} ${r.days} ${T("يوم")}`;
+async function recurringBox(box, onPaid) {
+  const d = await bapi('/recurring');
+  const manage = can('finance_manage') || can('settings_manage'), canPay = can('finance_manage');
+  const reload = () => recurringBox(box, onPaid).catch(fail);
+  const items = d.items;
+  box.innerHTML = `<div class="sec-title">${icon('clock')}<span class="grow"><b>${T("المصروفات الدورية")}</b> <span class="muted small">${T("رواتب، إيجار، رسوم سنوية — تنبيه في موعدها، والسداد يُخصم من حساب الشركة")}</span></span>
+      ${manage ? `<button class="btn sm" id="recNew">${icon('plus')}${T("إضافة")}</button>` : ''}</div>
+    ${items.length ? `<div class="rec-list">${items.map(r => `<div class="rec-item ${r.active ? '' : 'off'} ${r.status}" data-rec="${r.id}">
+        <div class="rec-main"><div class="rec-name"><b>${esc(r.name)}</b>${r.category_name ? ` <span class="badge muted">${esc(T(r.category_name))}</span>` : ''}</div>
+          <div class="small muted">${everyL(r.every)} · ${T("الاستحقاق القادم")}: <span class="num">${fmtDate(r.next_due)}</span>${r.last_paid ? ` · ${T("آخر سداد")}: <span class="num">${r.last_paid}</span> (${money(r.last_amount)})` : ''}</div>
+          ${r.note ? `<div class="small muted">${esc(r.note)}</div>` : ''}</div>
+        <div class="rec-side"><b class="num">${money(r.amount)}</b><span class="badge ${REC_ST[r.status][1]}">${r.active ? recWhen(r) : REC_ST.paused[0]}</span></div>
+        <div class="rec-acts">${canPay && r.active ? `<button class="btn sm ${r.status === 'later' ? '' : 'primary'}" data-pay="${r.id}">${icon('check')}${T("سداد")}</button><button class="btn sm ghost" data-skip="${r.id}">${T("تخطي هذه المرة")}</button>` : ''}
+          <span class="grow"></span>${manage ? `<button class="icon-btn" data-red="${r.id}" title="${T("تعديل")}">${icon('edit')}</button><button class="icon-btn danger" data-rdel="${r.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</div></div>`).join('')}
+    </div>` : `<div class="empty small">${T("لا توجد مصروفات دورية بعد — أضف الراتب أو الإيجار أو الرسوم السنوية ليصلك تنبيه في موعدها")}</div>`}`;
+  const byId = (id) => items.find(r => r.id == id);
+  if ($('#recNew', box)) $('#recNew', box).onclick = () => recurringEdit(null, reload);
+  $$('[data-red]', box).forEach(b => b.onclick = () => recurringEdit(byId(b.dataset.red), reload));
+  $$('[data-pay]', box).forEach(b => b.onclick = () => recurringPay(byId(b.dataset.pay), d.today, () => { reload(); onPaid && onPaid(); }));
+  $$('[data-skip]', box).forEach(b => b.onclick = async () => {
+    const r = byId(b.dataset.skip);
+    if (!await confirmBox(T("تخطي هذه المرة"), `<p>${T("لن يُسجّل أي مبلغ لاستحقاق")} <b>${esc(r.name)}</b> (${fmtDate(r.next_due)})، ${T("وينتقل الموعد إلى الدورة التالية")}.</p>`)) return;
+    busy(b, async () => { const x = await bapi(`/recurring/${r.id}/skip`, { method: 'POST' }); toast(`${T("الموعد القادم")}: ${x.next_due}`, 'ok'); reload(); });
+  });
+  $$('[data-rdel]', box).forEach(b => b.onclick = async () => {
+    const r = byId(b.dataset.rdel);
+    if (!await confirmBox(T("حذف مصروف دوري"), `<p>${T("حذف")} <b>${esc(r.name)}</b>؟ ${T("المبالغ التي سُددت سابقاً تبقى في المصروفات")}.</p>`, T("حذف"), true)) return;
+    busy(b, async () => { await bapi(`/recurring/${r.id}`, { method: 'DELETE' }); toast(T("تم الحذف"), 'ok'); reload(); });
+  });
+}
+function recurringEdit(r, after) {
+  const cats = S.meta.categories.filter(c => c.kind === 'expense' && (c.active || (r && c.id === r.category_id)));
+  const every = r ? r.every : 1;
+  const opts = [1, 2, 3, 4, 6, 12, 24].concat([1, 2, 3, 4, 6, 12, 24].includes(every) ? [] : [every]);
+  const md = modal(r ? T("تعديل مصروف دوري") : T("مصروف دوري جديد"), `<form autocomplete="off" class="fgrid">
+    <label class="full">${T("الاسم")}<input name="name" required maxlength="200" value="${esc(r?.name || '')}" placeholder="${T("مثال: راتب أحمد، إيجار المحل، رخصة البلدية")}"></label>
+    <label>${T("المبلغ")}<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${r ? r.amount : ''}"></label>
+    <label>${T("يتكرر")}<select name="every">${opts.map(n => `<option value="${n}" ${n === every ? 'selected' : ''}>${everyL(n)}</option>`).join('')}</select></label>
+    <label>${T("تاريخ الاستحقاق القادم")}<input name="next_due" type="date" required value="${r ? r.next_due : wd()}"></label>
+    <label>${T("التنبيه قبل الموعد بـ (أيام)")}<input name="remind_days" type="number" min="0" max="60" step="1" value="${r ? r.remind_days : 3}"></label>
+    <label>${T("التصنيف")}<select name="category_id"><option value="">— ${T("بدون")} —</option>${opt(cats, r?.category_id)}</select></label>
+    <label>${T("ملاحظة")} <span class="opt">${T("(اختياري)")}</span><input name="note" maxlength="500" value="${esc(r?.note || '')}"></label>
+    ${r ? `<label class="check full"><input type="checkbox" name="active" ${r.active ? 'checked' : ''}> ${T("مفعّل (يصل تنبيهه ويظهر للسداد)")}</label>` : ''}
+    <p class="muted small full" style="margin:0">${T("عند السداد يُسجّل مصروفاً من حساب الشركة ويُخصم من رصيدها، وينتقل الموعد تلقائياً للدورة التالية")}.</p>
+    <div class="mf full"><button class="btn primary">${icon('check')}${T("حفظ")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`);
+  const f = $('form', md.el);
+  f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+    const body = formObj(f);
+    if (r) body.active = f.active.checked;
+    await bapi(r ? `/recurring/${r.id}` : '/recurring', { method: r ? 'PUT' : 'POST', body });
+    md.close(); toast(T("تم الحفظ") + ' ✓', 'ok'); after();
+  }); };
+}
+function recurringPay(r, today, after) {
+  const md = modal(`${T("سداد")} — ${r.name}`, `<div class="summary-box">
+      <div class="r"><span>${T("الاستحقاق")}</span><b>${fmtDate(r.next_due)}</b> <span class="badge ${REC_ST[r.status][1]}">${recWhen(r)}</span></div>
+      <div class="r"><span>${T("الدورة")}</span><b>${everyL(r.every)}</b></div></div>
+    <form autocomplete="off" class="fgrid" style="margin-top:10px">
+      <label>${T("المبلغ المدفوع")}<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${r.amount}"></label>
+      <label>${T("تاريخ السداد")}<input name="date" type="date" required max="${today}" value="${today}"></label>
+      <label class="full">${T("ملاحظة")} <span class="opt">${T("(اختياري)")}</span><input name="note" maxlength="300"></label>
+      <p class="muted small full" style="margin:0">${icon('wallet')} ${T("يُخصم المبلغ من حساب الشركة ويظهر في المصروفات، وينتقل الموعد إلى الدورة التالية")}.</p>
+      <div class="mf full"><button class="btn primary">${icon('check')}${T("تأكيد السداد")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`);
+  const f = $('form', md.el);
+  f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+    const x = await bapi(`/recurring/${r.id}/pay`, { method: 'POST', body: formObj(f) });
+    md.close(); toast(`${T("تم السداد")} ✓ — ${T("الموعد القادم")}: ${x.next_due}`, 'ok'); after();
+  }); };
+}
 
 /* ═════════════════════════ shifts history ═════════════════════════ */
 
@@ -1262,6 +1338,7 @@ const F_L = {
   join_month: T("شهر الانضمام"), left_month: T("شهر الخروج"), guardian_access: T("متابعة الأب"), guardian_act: T("التصرف باسمه (طلب قرض)"), notes: T("ملاحظات"), installment: T("القسط"), start_month: T("بداية الأقساط"),
   anonymous: T("مجهول"), amount: T("المبلغ"), due_day: T("يوم الاستحقاق"), loan_multiplier: T("مضاعف حد القرض"), apply_from: T("يُطبّق من"), members: T("عدد الأعضاء"),
   issued_date: T("تاريخ الصرف"), over_limit: T("تجاوز الحد"), username: T("اسم الدخول"),
+  every: T("الدورة"), next_due: T("الاستحقاق القادم"), remind_days: T("التنبيه قبل (أيام)"), category_id: T("التصنيف"), note: T("ملاحظة"),
   type: T("النوع"), payment_method: T("طريقة الدفع"), amount: T("المبلغ"), fee: T("العمولة"), date: T("التاريخ"), category: T("التصنيف"), supplier: T("المورد"),
   invoice_no: T("رقم الفاتورة"), creditor: T("الدائن"), app: T("التطبيق"), description: T("الملاحظة"), cash_sales: T("الكاش"), card_sales: T("الشبكة"),
   orders_count: T("عدد الطلبات"), counted_cash: T("النقد المستلم"), cash_with_staff: T("نقد عند الموظفين"), difference: T("نتيجة الجرد"), notes: T("الملاحظات"),
@@ -1282,6 +1359,8 @@ const AUDIT_ACTIONS = {
   login: [T("تسجيل دخول"), 'muted'], password_reset_request: [T("طلب استعادة كلمة المرور"), 'warn'], login_failed: [T("محاولة دخول فاشلة"), 'neg'], password_change: [T("تغيير كلمة المرور"), 'warn'], shift_delete: [T("حذف إقفال"), 'neg'], admin_recovery: [T("استعادة كلمة مرور المالك من الاستضافة"), 'neg'], backup_download: [T("تنزيل نسخة احتياطية"), 'info'],
   apps_create: [T("إضافة تطبيق"), 'pos'], apps_update: [T("تعديل تطبيق"), 'warn'], categories_create: [T("إضافة تصنيف"), 'pos'], categories_update: [T("تعديل تصنيف"), 'warn'],
   creditors_create: [T("إضافة دائن"), 'pos'], creditors_update: [T("تعديل دائن"), 'warn'], creditors_delete: [T("حذف دائن"), 'neg'],
+  recurring_create: [T("إضافة مصروف دوري"), 'pos'], recurring_update: [T("تعديل مصروف دوري"), 'warn'], recurring_delete: [T("حذف مصروف دوري"), 'neg'],
+  recurring_pay: [T("سداد مصروف دوري"), 'info'], recurring_skip: [T("تخطي مصروف دوري"), 'warn'],
 };
 function fmtVal(k, v) {
   if (v === null || v === undefined || v === '') return '—';
@@ -1290,6 +1369,9 @@ function fmtVal(k, v) {
   if (k === 'kind') return v === 'dues' ? T("اشتراك") : v === 'installment' ? T("قسط قرض") : v === 'expense' ? T("مصروفات") : T("مشتريات");
   if (['contributing', 'guardian_access', 'anonymous'].includes(k)) return v ? T("نعم") : T("لا");
   if (['due_day', 'members', 'loan_multiplier'].includes(k)) return String(v);
+  if (k === 'every') return everyL(v);
+  if (k === 'remind_days') return String(v);
+  if (k === 'category_id') return T(S.meta?.categories?.find(c => c.id === v)?.name || String(v));
   if (k === 'active' || k === 'cashier_counts') return v ? T("نعم") : T("لا");
   if (typeof v === 'number') return ['orders_count', 'day_start_hour'].includes(k) ? String(v) : money(v);
   return T(String(v));
@@ -1326,6 +1408,10 @@ function auditBody(r) {
     case 'shift_close': return d.after ? shiftLine(d.after) : '';
     case 'login': case 'login_failed': case 'password_change': case 'backup_download': case 'password_reset_request':
       return [d.username ? esc(d.username) : '', d.ip ? `<span class="num muted">IP ${esc(d.ip)}</span>` : ''].filter(Boolean).join(' · ');
+    case 'recurring_pay': return `<b>${esc(d.name || '')}</b> · ${money(d.amount)} · ${T("استحقاق")} <span class="num">${esc(d.due || '')}</span> → ${T("القادم")} <span class="num">${esc(d.next_due || '')}</span>`;
+    case 'recurring_skip': return `<b>${esc(d.name || '')}</b> · ${T("استحقاق")} <span class="num">${esc(d.due || '')}</span> → ${T("القادم")} <span class="num">${esc(d.next_due || '')}</span>`;
+    case 'recurring_create': return `<b>${esc(d.after?.name || '')}</b> · ${money(d.after?.amount)} · ${everyL(d.after?.every)} · <span class="num">${esc(d.after?.next_due || '')}</span>`;
+    case 'recurring_delete': return `<span class="muted">${T("المحذوف:")}</span> <b>${esc(d.before?.name || '')}</b> · ${money(d.before?.amount)} · ${everyL(d.before?.every)}`;
     case 'creditors_delete': return Object.entries(d.before || {}).map(([k, v]) => `${F_L[k] || k}: ${esc(fmtVal(k, v))}`).join(' · ');
     case 'shift_delete': return `${T("يوم")} <span class="num">${esc(d.date || '')}</span>${d.before ? ` · ${shiftLine(d.before)}` : ''} · ${d.invoices || 0} ${T("فاتورة")}${d.moved_to ? ` → ${T("نُقلت إلى")} <span class="num">${esc(d.moved_to)}</span>` : ''}`;
     case 'shift_reopen': return d.before ? `<span class="muted">${T("قبل الفتح:")}</span> ${shiftLine(d.before)}` : '';

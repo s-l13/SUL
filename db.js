@@ -239,12 +239,19 @@ CREATE TABLE IF NOT EXISTS notifications (
   title TEXT NOT NULL, vars TEXT, link TEXT, read_at TEXT, created_at TEXT NOT NULL DEFAULT ${NOW}
 );
 CREATE INDEX IF NOT EXISTS ix_notif_user ON notifications(user_id, read_at);
+-- fixed expenses that come back every N months (salary, rent, yearly licence …): reminded on time, paid from the company account
+CREATE TABLE IF NOT EXISTS recurring_expenses (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), name TEXT NOT NULL, amount ${REAL} NOT NULL, category_id INTEGER,
+  every INTEGER NOT NULL DEFAULT 1, next_due TEXT NOT NULL, due_day INTEGER NOT NULL DEFAULT 1, remind_days INTEGER NOT NULL DEFAULT 3,
+  active INTEGER NOT NULL DEFAULT 1, notified_for TEXT, last_paid TEXT, last_amount ${REAL}, note TEXT, created_by INTEGER, deleted_at TEXT,
+  created_at TEXT NOT NULL DEFAULT ${NOW}
+);
 CREATE TABLE IF NOT EXISTS snapshots (
   id ${ID}, label TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT ${NOW}
 );`;
 // every table, parents before children (used by export / copy / reset)
 const TABLES = ['businesses', 'users', 'user_business', 'sessions', 'delivery_apps', 'categories', 'creditors', 'shifts', 'shift_app_sales', 'transactions', 'tx_items', 'audit_log',
-  'fund_settings', 'fund_categories', 'fund_members', 'fund_rates', 'fund_loans', 'fund_payments', 'fund_loan_requests', 'fund_banners', 'fund_report_requests', 'fund_goals', 'fund_goal_gifts', 'notifications'];
+  'fund_settings', 'fund_categories', 'fund_members', 'fund_rates', 'fund_loans', 'fund_payments', 'fund_loan_requests', 'fund_banners', 'fund_report_requests', 'fund_goals', 'fund_goal_gifts', 'notifications', 'recurring_expenses'];
 
 // SQLite files created by earlier versions: add the columns that came later
 async function migrateSqlite() {
