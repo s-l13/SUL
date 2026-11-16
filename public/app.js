@@ -597,7 +597,7 @@ const itemsHTML = (items) => items && items.length ? `<details class="itd"><summ
   <table>${items.map(i => `<tr><td>${esc(T(i.name))}</td><td class="num">${i.qty} × ${money(i.price)}</td><td class="num">${money(i.total)}</td></tr>`).join('')}</table></details>` : '';
 
 function txFormHTML(opts = {}) {
-  const types = opts.types || (can('finance_manage') ? Object.keys(S.me.txTypes) : ['purchase', 'expense']);
+  const types = opts.types || (can('finance_manage') ? Object.keys(S.me.txTypes).filter(k => k !== 'advance') : ['purchase', 'expense']);
   return `<form class="txf">
     <div class="seg" ${types.length < 2 ? 'hidden' : ''}>${types.map((k, i) => `<label><input type="radio" name="type" value="${k}" ${i === 0 ? 'checked' : ''}><span>${S.me.txTypes[k]}</span></label>`).join('')}</div>
     <div class="fgrid">
@@ -705,9 +705,9 @@ function openTxModal({ tx = null, types, title, preset = {}, onSaved } = {}) {
 }
 async function deleteTx(t, after) {
   if (!await confirmBox(T("حذف حركة"), `<p>${T("حذف")} ${esc(S.me.txTypes[t.type])} ${T("بمبلغ")} <b>${money(t.amount)}</b>${T("؟")}<br><span class="muted small">${T("تبقى الحركة محفوظة في سجل المحذوفات")}.</span></p>`, T("حذف"), true)) return;
-  try { await bapi('/transactions/' + t.id, { method: 'DELETE' }); toast(T("تم الحذف"), 'ok'); after && after(); } catch (e) { fail(e); }
+  try { const x = await bapi('/transactions/' + t.id, { method: 'DELETE' }); toast(T("تم الحذف") + (x && x.recurring_due ? ` — ${T("رجع موعد الاستحقاق إلى")} ${x.recurring_due}` : ''), 'ok'); after && after(); } catch (e) { fail(e); }
 }
-const OUT_T = ['purchase', 'expense', 'debt_payment', 'withdrawal'];
+const OUT_T = ['purchase', 'expense', 'debt_payment', 'withdrawal', 'advance'];
 function daySums(txs) {
   const outs = txs.filter(t => OUT_T.includes(t.type)), add = (l, f) => r2(l.reduce((a, t) => a + f(t), 0));
   const drawer = outs.filter(t => t.payment_method === 'drawer');
@@ -734,7 +734,7 @@ const appSend = (rows) => rows.map(({ app_id, amount, orders_count }) => ({ app_
 const payTag = (t) => !t.card_part ? '' : t.card_part >= t.amount ? ` <span class="badge muted">${icon('card')}${T("شبكة")}</span>` : ` <span class="badge muted">${T("كاش")} ${money(r2(t.amount - t.card_part))} + ${T("شبكة")} ${money(t.card_part)}</span>`;
 const txDesc = (t) => [t.category_name && T(t.category_name), t.supplier, t.app_name && T(t.app_name), t.creditor_name, t.description].filter(Boolean).map(esc).join(' · ') + payTag(t);
 const signedAmount = (t) => {
-  const neg = ['purchase', 'expense', 'debt_payment', 'withdrawal', 'debt_writeoff'].includes(t.type);
+  const neg = ['purchase', 'expense', 'debt_payment', 'withdrawal', 'debt_writeoff', 'advance'].includes(t.type);
   const v = t.type === 'adjustment' ? t.amount : neg ? -t.amount : t.amount;
   return `<span class="num ${v < 0 ? 'neg-t' : 'pos-t'}">${money(v)}</span>`;
 };
@@ -1061,7 +1061,7 @@ VIEWS.tx = async (el) => {
 // rent, salaries, electricity… : list, totals by category, quick add
 VIEWS.expenses = async (el) => {
   const st = VIEWS.expenses.st || (VIEWS.expenses.st = { from: wd().slice(0, 8) + '01', to: wd(), category_id: '' });
-  const canAdd = can('finance_manage') || can('purchases_add');
+  const canAdd = can('finance_manage') || can('purchases_add') || can('settings_manage');
   const cats = S.meta.categories.filter(c => c.kind === 'expense');
   el.innerHTML = `${pageHead('fileText', T("المصروفات"), T("الرواتب والإيجار والكهرباء وغيرها"), `${canAdd ? `<button class="btn primary" id="bNewExp">${icon('plus')}${T("مصروف جديد")}</button>` : ''}`)}
     <section class="card rec-box" id="recBox"></section>
@@ -1090,11 +1090,18 @@ VIEWS.expenses = async (el) => {
           <td class="small muted">${esc(S.me.methods[t.payment_method])}</td><td class="n"><b>${money(t.amount)}</b></td>
           <td class="row-acts">${can('tx_edit') ? `<button class="icon-btn" data-ed="${t.id}" title="${T("تعديل")}">${icon('edit')}</button><button class="icon-btn danger" data-del="${t.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}
         </tbody></table></div>` : `<div class="empty">${T("لا توجد مصروفات في هذه الفترة")}</div>`}</section>`;
-    $$('[data-del]', el).forEach(b => b.onclick = () => deleteTx(rows.find(t => t.id == b.dataset.del), load));
+    $$('[data-del]', el).forEach(b => b.onclick = () => deleteTx(rows.find(t => t.id == b.dataset.del), () => { load(); recurringBox($('#recBox'), load).catch(fail); }));
     $$('[data-ed]', el).forEach(b => b.onclick = () => openTxModal({ tx: rows.find(t => t.id == b.dataset.ed), onSaved: load }));
   };
   $('#fE').onchange = () => load().catch(fail);
-  if ($('#bNewExp')) $('#bNewExp').onclick = () => openTxModal({ types: ['expense'], title: T("مصروف جديد"), onSaved: load });
+  const oneOff = () => openTxModal({ types: ['expense'], title: T("مصروف جديد"), onSaved: load });
+  if ($('#bNewExp')) $('#bNewExp').onclick = () => {
+    if (!recurringBox.add) return oneOff();
+    const md = modal(T("مصروف جديد"), `<div class="pick-list">
+      <button type="button" class="btn block pick" data-k="one">${icon('receipt')}<span class="grow"><b>${T("مصروف لمرة واحدة")}</b><span class="small muted d-block">${T("كهرباء، صيانة، نثريات…")}</span></span></button>
+      <button type="button" class="btn block pick" data-k="rec">${icon('clock')}<span class="grow"><b>${T("راتب أو مصروف دوري")}</b><span class="small muted d-block">${T("راتب عامل، إيجار، رسوم سنوية — يتكرر ويصلك تنبيه بموعده")}</span></span></button></div>`);
+    $$('[data-k]', md.el).forEach(b => b.onclick = () => { md.close(); b.dataset.k === 'one' ? oneOff() : recurringBox.add(); });
+  };
   await Promise.all([load(), recurringBox($('#recBox'), load)]);
 };
 
@@ -1108,19 +1115,22 @@ async function recurringBox(box, onPaid) {
   const reload = () => recurringBox(box, onPaid).catch(fail);
   const items = d.items;
   box.innerHTML = `<div class="sec-title">${icon('clock')}<span class="grow"><b>${T("المصروفات الدورية")}</b> <span class="muted small">${T("رواتب، إيجار، رسوم سنوية — تنبيه في موعدها، والسداد يُخصم من حساب الشركة")}</span></span>
-      ${manage ? `<button class="btn sm" id="recNew">${icon('plus')}${T("إضافة")}</button>` : ''}</div>
+</div>
     ${items.length ? `<div class="rec-list">${items.map(r => `<div class="rec-item ${r.active ? '' : 'off'} ${r.status}" data-rec="${r.id}">
         <div class="rec-main"><div class="rec-name"><b>${esc(r.name)}</b>${r.category_name ? ` <span class="badge muted">${esc(T(r.category_name))}</span>` : ''}</div>
           <div class="small muted">${everyL(r.every)} · ${T("الاستحقاق القادم")}: <span class="num">${fmtDate(r.next_due)}</span>${r.last_paid ? ` · ${T("آخر سداد")}: <span class="num">${r.last_paid}</span> (${money(r.last_amount)})` : ''}</div>
-          ${r.note ? `<div class="small muted">${esc(r.note)}</div>` : ''}</div>
+          ${r.note ? `<div class="small muted">${esc(r.note)}</div>` : ''}
+          ${advLine(r)}</div>
         <div class="rec-side"><b class="num">${money(r.amount)}</b><span class="badge ${REC_ST[r.status][1]}">${r.active ? recWhen(r) : REC_ST.paused[0]}</span></div>
-        <div class="rec-acts">${canPay && r.active ? `<button class="btn sm ${r.status === 'later' ? '' : 'primary'}" data-pay="${r.id}">${icon('check')}${T("سداد")}</button><button class="btn sm ghost" data-skip="${r.id}">${T("تخطي هذه المرة")}</button>` : ''}
+        <div class="rec-acts">${canPay && r.active ? `<button class="btn sm ${r.status === 'later' ? '' : 'primary'}" data-pay="${r.id}">${icon('check')}${T("سداد")}</button><button class="btn sm ghost" data-skip="${r.id}">${T("تخطي هذه المرة")}</button>${isSalary(r) ? `<button class="btn sm" data-adv="${r.id}">${icon('hand')}${T("سلفة عامل")}</button>` : ''}` : ''}
           <span class="grow"></span>${manage ? `<button class="icon-btn" data-red="${r.id}" title="${T("تعديل")}">${icon('edit')}</button><button class="icon-btn danger" data-rdel="${r.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</div></div>`).join('')}
     </div>` : `<div class="empty small">${T("لا توجد مصروفات دورية بعد — أضف الراتب أو الإيجار أو الرسوم السنوية ليصلك تنبيه في موعدها")}</div>`}`;
   const byId = (id) => items.find(r => r.id == id);
-  if ($('#recNew', box)) $('#recNew', box).onclick = () => recurringEdit(null, reload);
+  recurringBox.add = manage ? () => recurringEdit(null, reload) : null;
   $$('[data-red]', box).forEach(b => b.onclick = () => recurringEdit(byId(b.dataset.red), reload));
   $$('[data-pay]', box).forEach(b => b.onclick = () => recurringPay(byId(b.dataset.pay), d.today, () => { reload(); onPaid && onPaid(); }));
+  $$('[data-adv]', box).forEach(b => b.onclick = () => advanceNew(byId(b.dataset.adv), d.today, () => { reload(); onPaid && onPaid(); }));
+  $$('[data-advs]', box).forEach(b => b.onclick = () => advanceList(byId(b.dataset.advs), canPay, () => { reload(); onPaid && onPaid(); }));
   $$('[data-skip]', box).forEach(b => b.onclick = async () => {
     const r = byId(b.dataset.skip);
     if (!await confirmBox(T("تخطي هذه المرة"), `<p>${T("لن يُسجّل أي مبلغ لاستحقاق")} <b>${esc(r.name)}</b> (${fmtDate(r.next_due)})، ${T("وينتقل الموعد إلى الدورة التالية")}.</p>`)) return;
@@ -1131,6 +1141,69 @@ async function recurringBox(box, onPaid) {
     if (!await confirmBox(T("حذف مصروف دوري"), `<p>${T("حذف")} <b>${esc(r.name)}</b>؟ ${T("المبالغ التي سُددت سابقاً تبقى في المصروفات")}.</p>`, T("حذف"), true)) return;
     busy(b, async () => { await bapi(`/recurring/${r.id}`, { method: 'DELETE' }); toast(T("تم الحذف"), 'ok'); reload(); });
   });
+}
+// a worker's advances under the salary: what is still owed and what the next salary takes
+const isSalary = (r) => /راتب|رواتب|salary/i.test(`${r.name} ${r.category_name || ''}`) || (r.advances || []).length > 0;
+const advKind = (a) => a.installments > 1 ? `${T("مقسطة على")} ${a.installments} ${T("شهر")} (${money(a.installment)} ${T("شهرياً")})` : T("تُخصم من الراتب القادم");
+const advLine = (r) => (r.advances || []).some(a => a.remaining > 0.004) ? `<div class="small adv-line">${icon('hand')} ${T("سلف")}: ${T("متبقي")} <b class="num">${money(r.advances_left)}</b>
+  · ${T("يُخصم من الراتب القادم")} <b class="num">${money(r.next_deduction)}</b> <button type="button" class="btn sm ghost" data-advs="${r.id}">${T("التفاصيل")}</button></div>`
+  : (r.advances || []).length ? `<div class="small muted"><button type="button" class="btn sm ghost" data-advs="${r.id}">${T("سلف مسددة")} (${r.advances.length})</button></div>` : '';
+function advanceNew(r, today, after) {
+  const md = modal(`${T("سلفة عامل")} — ${r.name}`, `<form autocomplete="off" class="fgrid">
+    <label class="full big">${T("مبلغ السلفة")}<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required></label>
+    <div class="seg full-seg full">${[['1', T("تُسدد من الراتب القادم")], ['n', T("مقسطة على عدة أشهر")]].map(([k, l], i) => `<label><input type="radio" name="kind" value="${k}" ${i ? '' : 'checked'}><span>${l}</span></label>`).join('')}</div>
+    <label data-n hidden>${T("عدد الأشهر")}<input name="months" type="number" min="2" max="120" step="1" inputmode="numeric" value="12"></label>
+    <label>${T("دُفعت من")}<select name="payment_method"><option value="company">${S.me.methods.company}</option><option value="drawer">${S.me.methods.drawer}</option></select></label>
+    <label data-date>${T("التاريخ")}<input name="date" type="date" max="${today}" value="${today}"></label>
+    <label class="full">${T("ملاحظة")} <span class="opt">${T("(اختياري)")}</span><input name="note" maxlength="300"></label>
+    <div class="summary-box full" id="advEx"></div>
+    <p class="muted small full" style="margin:0">${T("السلفة دَين على العامل وليست مصروفاً: يبقى رصيد الشركة كما هو، وتُخصم تلقائياً عند «سداد» الراتب، ويُسجّل الراتب كاملاً مصروفاً ويُدفع الباقي فقط")}.</p>
+    <div class="mf full"><button class="btn primary">${icon('check')}${T("تسجيل السلفة")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`);
+  const f = $('form', md.el);
+  const n = () => f.kind.value === 'n' ? Math.max(2, parseInt(f.months.value) || 2) : 1;
+  const draw = () => {
+    $('[data-n]', f).hidden = f.kind.value !== 'n';
+    $('[data-date]', f).hidden = f.payment_method.value === 'drawer';
+    const a = r2(f.amount.value), k = n(), inst = r2(a / k);
+    $('#advEx', md.el).innerHTML = !a ? `<div class="r muted"><span>${T("اكتب المبلغ")}</span></div>` : k === 1
+      ? `<div class="r"><span>${T("يُخصم من الراتب القادم")}</span><b>${M(a)}</b></div><div class="r"><span>${T("الراتب القادم بعد الخصم")}</span>${M(r2(r.amount - (r.next_deduction || 0) - a))}</div>`
+      : `<div class="r"><span>${T("يُخصم شهرياً")}</span><b>${M(inst)}</b></div><div class="r"><span>${T("لمدة")}</span><b>${k} ${T("شهر")}</b></div>${Math.abs(inst * k - a) > 0.004 ? `<div class="r small muted"><span>${T("القسط الأخير")}</span>${M(r2(a - inst * (k - 1)))}</div>` : ''}`;
+  };
+  f.oninput = draw; f.onchange = draw; draw();
+  f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+    const body = { amount: f.amount.value, installments: n(), payment_method: f.payment_method.value, date: f.date.value, note: f.note.value };
+    if (r2(body.amount) > r.amount * 3 && !await confirmBox(T("تأكيد"), `<p>${T("مبلغ السلفة أكبر من ثلاثة رواتب")} (${money(r.amount)}). ${T("متأكد؟")}</p>`)) return;
+    await bapi(`/recurring/${r.id}/advances`, { method: 'POST', body });
+    md.close(); toast(T("تم تسجيل السلفة") + ' ✓', 'ok'); after();
+  }); };
+}
+function advanceList(r, canDel, after) {
+  const md = modal(`${T("سلف")} — ${r.name}`, `<div class="tbl-wrap"><table><thead><tr><th>${T("التاريخ")}</th><th>${T("المبلغ")}</th><th>${T("النوع")}</th><th>${T("سُدّد")}</th><th>${T("المتبقي")}</th><th></th></tr></thead><tbody>
+    ${r.advances.map(a => `<tr><td class="num small">${a.date}<div class="muted">${esc(S.me.methods[a.payment_method] || '')}</div></td><td class="n">${money(a.amount)}</td>
+      <td class="small">${advKind(a)}${a.note ? `<div class="muted">${esc(a.note)}</div>` : ''}</td>
+      <td class="n pos-t">${money(a.paid)}<div class="small muted">${a.deductions} ${T("خصم")}</div></td><td class="n"><b>${money(a.remaining)}</b></td>
+      <td>${canDel && !a.deductions ? `<button class="icon-btn danger" data-adel="${a.id}" title="${T("حذف")}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}
+    </tbody><tfoot><tr><td>${T("الإجمالي")}</td><td class="n">${money(r2(r.advances.reduce((s, a) => s + a.amount, 0)))}</td><td></td><td class="n">${money(r2(r.advances.reduce((s, a) => s + a.paid, 0)))}</td><td class="n">${money(r.advances_left)}</td><td></td></tr></tfoot></table></div>
+    <div class="mf"><button type="button" class="btn" data-x>${T("إغلاق")}</button></div>`, { wide: true });
+  $$('[data-adel]', md.el).forEach(b => b.onclick = async () => {
+    const a = r.advances.find(x => x.id == b.dataset.adel);
+    if (!await confirmBox(T("حذف سلفة"), `<p>${T("حذف سلفة")} <b>${money(a.amount)}</b> ${T("بتاريخ")} ${a.date}؟ ${T("يعود المبلغ كأنه لم يُصرف")}.</p>`, T("حذف"), true)) return;
+    busy(b, async () => { await bapi('/advances/' + a.id, { method: 'DELETE' }); md.close(); toast(T("تم الحذف"), 'ok'); after(); });
+  });
+}
+function payReceipt(x) {
+  modal(T("تم السداد"), `<div class="result"><div class="res-ic">${icon('check')}</div><p><b>${esc(x.name)}</b> — ${T("تم تسجيل السداد بنجاح")}.</p>
+    <div class="summary-box" style="text-align:start">
+      <div class="r"><span>${T("الاستحقاق")}</span><span class="num">${fmtDate(x.due)}</span></div>
+      <div class="r"><span>${T("تاريخ السداد")}</span><span class="num">${fmtDate(x.date)}</span></div>
+      <div class="r"><span>${x.deducted ? T("الراتب") : T("المبلغ")}</span>${M(x.amount)}</div>
+      ${x.deducted ? `<div class="r"><span>− ${T("خصم السلف")}</span>${M(x.deducted)}</div><div class="r t"><span>${T("المدفوع فعلاً للعامل")}</span><b>${M(x.net)}</b></div>` : ''}
+      ${x.balance_before !== undefined ? `<div class="r t"><span>${T("رصيد الشركة")}</span><span>${money(x.balance_before)} ← <b>${money(x.balance_after)}</b></span></div>
+        <div class="r small muted"><span>${T("سُجّل مصروفاً من حساب الشركة")}</span>−${money(x.amount)}</div>` : ''}
+      ${x.advances_left ? `<div class="r"><span>${T("السلف المتبقية على العامل")}</span>${M(x.advances_left)}</div>` : ''}
+      <div class="r"><span>${T("الموعد القادم")}</span><b class="num">${fmtDate(x.next_due)}</b></div></div>
+    <p class="muted small">${T("يظهر في «المصروفات» وفي التقرير اليومي ليوم")} ${fmtDate(x.date)}.</p></div>
+    <div class="mf"><button class="btn primary block" data-x>${T("تم")}</button></div>`);
 }
 function recurringEdit(r, after) {
   const cats = S.meta.categories.filter(c => c.kind === 'expense' && (c.active || (r && c.id === r.category_id)));
@@ -1156,19 +1229,29 @@ function recurringEdit(r, after) {
   }); };
 }
 function recurringPay(r, today, after) {
+  const advs = (r.advances || []).filter(a => a.remaining > 0.004);
   const md = modal(`${T("سداد")} — ${r.name}`, `<div class="summary-box">
       <div class="r"><span>${T("الاستحقاق")}</span><b>${fmtDate(r.next_due)}</b> <span class="badge ${REC_ST[r.status][1]}">${recWhen(r)}</span></div>
       <div class="r"><span>${T("الدورة")}</span><b>${everyL(r.every)}</b></div></div>
     <form autocomplete="off" class="fgrid" style="margin-top:10px">
-      <label>${T("المبلغ المدفوع")}<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${r.amount}"></label>
+      <label>${(r.advances || []).some(a => a.remaining > 0.004) ? T("الراتب (قبل خصم السلف)") : T("المبلغ المدفوع")}<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required value="${r.amount}"></label>
       <label>${T("تاريخ السداد")}<input name="date" type="date" required max="${today}" value="${today}"></label>
       <label class="full">${T("ملاحظة")} <span class="opt">${T("(اختياري)")}</span><input name="note" maxlength="300"></label>
+      ${advs.length ? `<div class="full"><div class="sec-title">${icon('hand')}<span class="grow">${T("خصم السلف من هذا الراتب")}</span></div>
+        ${advs.map(a => `<label class="adv-ded"><span>${money(a.amount)} — ${advKind(a)} <span class="muted small">(${T("متبقي")} ${money(a.remaining)})</span></span><input data-ded="${a.id}" type="number" step="0.01" min="0" max="${a.remaining}" inputmode="decimal" value="${a.next}"></label>`).join('')}
+        <div class="summary-box" id="payNet"></div></div>` : ''}
       <p class="muted small full" style="margin:0">${icon('wallet')} ${T("يُخصم المبلغ من حساب الشركة ويظهر في المصروفات، وينتقل الموعد إلى الدورة التالية")}.</p>
       <div class="mf full"><button class="btn primary">${icon('check')}${T("تأكيد السداد")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`);
   const f = $('form', md.el);
+  const net = () => { const box = $('#payNet', md.el); if (!box) return;
+    const g = r2(f.amount.value), dd = r2($$('[data-ded]', f).reduce((t, i) => t + r2(i.value), 0));
+    box.innerHTML = `<div class="r"><span>${T("الراتب")}</span>${M(g)}</div><div class="r"><span>− ${T("خصم السلف")}</span>${M(dd)}</div><div class="r t"><span>${T("المدفوع فعلاً للعامل")}</span><b class="${g - dd < 0 ? 'neg-t' : ''}">${M(r2(g - dd))}</b></div>`; };
+  f.addEventListener('input', net); net();
   f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
-    const x = await bapi(`/recurring/${r.id}/pay`, { method: 'POST', body: formObj(f) });
-    md.close(); toast(`${T("تم السداد")} ✓ — ${T("الموعد القادم")}: ${x.next_due}`, 'ok'); after();
+    const body = formObj(f);
+    if (advs.length) body.deductions = $$('[data-ded]', f).map(i => ({ advance_id: Number(i.dataset.ded), amount: r2(i.value) }));
+    const x = await bapi(`/recurring/${r.id}/pay`, { method: 'POST', body });
+    md.close(); after(); payReceipt(x);
   }); };
 }
 
@@ -1407,7 +1490,7 @@ const AUDIT_ACTIONS = {
   apps_create: [T("إضافة تطبيق"), 'pos'], apps_update: [T("تعديل تطبيق"), 'warn'], app_fees_update: [T("تعديل رسوم شركة توصيل"), 'warn'], categories_create: [T("إضافة تصنيف"), 'pos'], categories_update: [T("تعديل تصنيف"), 'warn'],
   creditors_create: [T("إضافة دائن"), 'pos'], creditors_update: [T("تعديل دائن"), 'warn'], creditors_delete: [T("حذف دائن"), 'neg'],
   recurring_create: [T("إضافة مصروف دوري"), 'pos'], recurring_update: [T("تعديل مصروف دوري"), 'warn'], recurring_delete: [T("حذف مصروف دوري"), 'neg'],
-  recurring_pay: [T("سداد مصروف دوري"), 'info'], recurring_skip: [T("تخطي مصروف دوري"), 'warn'],
+  recurring_pay: [T("سداد مصروف دوري"), 'info'], advance_create: [T("سلفة عامل"), 'info'], advance_delete: [T("حذف سلفة عامل"), 'neg'], recurring_skip: [T("تخطي مصروف دوري"), 'warn'],
 };
 function fmtVal(k, v) {
   if (v === null || v === undefined || v === '') return '—';
@@ -1455,7 +1538,8 @@ function auditBody(r) {
     case 'shift_close': return d.after ? shiftLine(d.after) : '';
     case 'login': case 'login_failed': case 'password_change': case 'backup_download': case 'password_reset_request':
       return [d.username ? esc(d.username) : '', d.ip ? `<span class="num muted">IP ${esc(d.ip)}</span>` : ''].filter(Boolean).join(' · ');
-    case 'recurring_pay': return `<b>${esc(d.name || '')}</b> · ${money(d.amount)} · ${T("استحقاق")} <span class="num">${esc(d.due || '')}</span> → ${T("القادم")} <span class="num">${esc(d.next_due || '')}</span>`;
+    case 'advance_create': case 'advance_delete': return `<b>${esc(d.name || '')}</b> · ${money(d.amount)} · ${d.installments > 1 ? `${T("مقسطة على")} ${d.installments} ${T("شهر")}` : T("تُخصم من الراتب القادم")}`;
+    case 'recurring_pay': return `<b>${esc(d.name || '')}</b> · ${money(d.amount)}${d.deducted ? ` · ${T("خصم سلفة")} ${money(d.deducted)} · ${T("المدفوع فعلاً")} ${money(d.net)}` : ''} · ${T("استحقاق")} <span class="num">${esc(d.due || '')}</span> → ${T("القادم")} <span class="num">${esc(d.next_due || '')}</span>`;
     case 'recurring_skip': return `<b>${esc(d.name || '')}</b> · ${T("استحقاق")} <span class="num">${esc(d.due || '')}</span> → ${T("القادم")} <span class="num">${esc(d.next_due || '')}</span>`;
     case 'recurring_create': return `<b>${esc(d.after?.name || '')}</b> · ${money(d.after?.amount)} · ${everyL(d.after?.every)} · <span class="num">${esc(d.after?.next_due || '')}</span>`;
     case 'recurring_delete': return `<span class="muted">${T("المحذوف:")}</span> <b>${esc(d.before?.name || '')}</b> · ${money(d.before?.amount)} · ${everyL(d.before?.every)}`;
@@ -1519,6 +1603,10 @@ VIEWS.reports = async (el, [tab = 'daily']) => {
 
 // report building blocks
 const rl = (label, v, { note = '', cls = '' } = {}) => `<div class="rl ${cls}"><div class="rl-l">${label}${note ? `<span class="rl-n">${note}</span>` : ''}</div><div class="rl-v">${v === null || v === undefined ? '' : typeof v === 'string' ? v : money(v)}</div></div>`;
+// salaries and other recurring expenses paid in the report's range (each one, what came off for advances, what was paid)
+const recPaidCard = (m, dates) => m.recurring_paid && m.recurring_paid.list.length ? repCard('clock', T("الرواتب والمصروفات الدورية المدفوعة"),
+  `${m.recurring_paid.list.map(x => rl(`${esc(x.name)}${dates ? ` <span class="muted small num">${x.date}</span>` : ''}`, x.amount, { note: x.deducted ? `${T("خصم سلفة")} ${money(x.deducted)} · ${T("دُفع")} ${money(x.net)}` : '' })).join('')}
+  ${rl(T("الإجمالي (خُصم من رصيد الشركة)"), m.recurring_paid.total, { cls: 'total' })}`) : '';
 const repCard = (ic, title, body, { cls = '', extra = '' } = {}) => `<section class="rep-card ${cls}"><h4>${icon(ic)}<span class="grow">${title}</span>${extra}</h4><div class="rc-b">${body}</div></section>`;
 const repHead = (title, sub, chips) => `<div class="rep-head"><div class="rh-ic">${logoURL(S.meta.business) ? `<img class="r-logo" src="${logoURL(S.meta.business)}" alt="">` : icon('fileText')}</div>
   <div class="rh-t"><h2>${title}</h2><div class="rh-sub">${sub}</div></div>${chips}</div>`;
@@ -1581,16 +1669,20 @@ async function dailyReport(box) {
         ${m.card_fee ? rl(`${T("رسوم البطاقة")} (${d.card_fee_pct}%) −`, m.card_fee, { cls: 'minus' }) : ''}
         ${m.purchases_paid ? rl(T("مشتريات مدفوعة") + ' −', m.purchases_paid, { cls: 'minus' }) : ''}
         ${m.expenses_paid ? rl(T("مصروفات مدفوعة") + ' −', m.expenses_paid, { cls: 'minus' }) : ''}
+        ${m.recurring_paid && m.recurring_paid.total ? rl(T("منها رواتب ومصروفات دورية"), m.recurring_paid.total, { cls: 'sub' }) : ''}
         ${m.debt_payments ? rl(T("سداد ديون") + ' −', m.debt_payments, { cls: 'minus' }) : ''}
         ${m.withdrawals ? rl(T("مسحوبات المالك") + ' −', m.withdrawals, { cls: 'minus' }) : ''}
         ${m.app_commission ? rl(T("عمولات ورسوم التطبيقات") + ' −', m.app_commission, { cls: 'minus' }) : ''}
         ${other ? rl(T("تمويل وإيداعات") + ' +', other, { cls: 'plus' }) : ''}
         ${m.adjustments ? rl(T("تسويات") + ' ±', m.adjustments) : ''}
         ${m.cash_diff ? rl(T("فروقات الجرد") + ' ±', m.cash_diff, { cls: m.cash_diff < 0 ? 'minus' : 'plus' }) : ''}
+        ${m.advances_given ? rl(T("سلف للعمال"), m.advances_given, { note: T("لا تمس الرصيد — تُخصم من الرواتب"), cls: 'muted-row' }) : ''}
         ${m.purchases_credit + m.expenses_credit ? rl(T("مشتريات ومصروفات على الدين"), r2(m.purchases_credit + m.expenses_credit), { note: T("لا تمس الرصيد — تُضاف للديون"), cls: 'muted-row' }) : ''}
         ${rl(T("صافي حركة اليوم"), m.net_movement, { cls: 'total' })}
         ${rl(T("رصيد الشركة نهاية اليوم"), d.end_balance, { cls: 'hl' })}
-        ${rl(T("آجله منها (لدى التطبيقات)"), d.receivables.total, { cls: 'hl' })}`)}
+        ${rl(T("آجله منها (لدى التطبيقات)"), d.receivables.total, { cls: 'hl' })}
+        ${d.advances && d.advances.total ? rl(T("ومنها سلف عند العمال"), d.advances.total, { cls: 'hl' }) : ''}`)}
+      ${recPaidCard(m)}
       ${repCard('cash', S.meta.business.cash_count ? T("النقد — جرد الدرج") : T("النقد"), drawer, { extra: d.shifts.some(s => s.counted_at) ? diffBadge(r2(cashRes)) : '' })}
       ${repCard('landmark', T("الديون — لمن وكم"), `${debtsTable(d.debts_day, T("بداية اليوم"))}
         <div style="margin-top:10px">${rl(T("تغطية رصيد الشركة للديون"), d.coverage === null ? '—' : `<span class="prog-cell"><span class="progress"><i style="width:${Math.min(100, d.coverage || 0)}%"></i></span>${d.coverage}%</span>`)}
@@ -1656,6 +1748,7 @@ async function periodReport(box) {
         ${rl(T("سداد ديون"), m.debt_payments, { cls: 'muted-row' })}${rl(T("تمويل وديون جديدة"), m.loans, { cls: 'muted-row' })}
         ${rl(T("مسحوبات المالك"), m.withdrawals, { cls: 'muted-row' })}${rl(T("تحصيل من التطبيقات"), m.app_collected, { cls: 'muted-row' })}
         ${rl(T("رصيد نهاية الفترة"), d.end_balance, { cls: 'hl' })}`)}
+      ${recPaidCard(m, true)}
       ${repCard('cart', T("المشتريات حسب التصنيف"), cats('purchase'))}
       ${repCard('fileText', T("المصروفات حسب التصنيف"), cats('expense'))}
       ${repCard('store', T("أكبر الموردين"), d.bySupplier.length ? `<table><tbody>${d.bySupplier.map(s => `<tr><td>${esc(T(s.name))}</td><td class="small muted">${s.n} ${T("فاتورة")}</td><td class="n">${money(s.amount)}</td></tr>`).join('')}</tbody></table>` : `<p class="muted">${T("لا يوجد")}</p>`)}
@@ -1687,6 +1780,11 @@ VIEWS.finance = async (el) => {
     ${d.receivables.list.map(a => `<tr><td><b>${esc(T(a.name))}</b>${a.active ? '' : ` <span class="badge muted">${T("مخفي")}</span>`}<div class="small muted">${feeRule(a) ? `${T("الرسوم")}: ${feeRule(a)}` : T("بدون رسوم محددة")}</div></td><td class="n">${money(a.opening_receivable)}</td><td class="n">${money(a.sold)}</td><td class="n">${a.fees ? `<span class="neg-t">${money(a.fees)}</span>` : money(0)}</td><td class="n">${money(a.collected)}</td><td class="n"><b>${money(a.balance)}</b></td>
       <td class="row-acts">${fin ? `<button class="btn sm soft" data-settle="${a.id}">${icon('download')}${T("تسجيل تحصيل")}</button>${a.balance > 0.004 ? `<button class="btn sm" data-feebook="${a.id}">${icon('minusCircle')}${T("ترحيل كرسوم")}</button>` : ''}` : ''}${can('settings_manage') ? `<button class="icon-btn" data-rates="${a.id}" title="${T("رسوم الشركة")}">${icon('sliders')}</button>` : ''}</td></tr>`).join('')}
     </tbody><tfoot><tr><td>${T("الإجمالي")}</td><td></td><td></td><td class="n">${money(r2(d.receivables.list.reduce((t, a) => t + (a.fees || 0), 0)))}</td><td></td><td class="n">${money(d.receivables.total)}</td><td></td></tr></tfoot></table></div></section>
+  ${d.advances && d.advances.list.length ? `<section class="card"><div class="card-head"><h3>${icon('hand')}${T("سلف العمال")}</h3><a class="btn sm ghost" href="#/expenses">${T("المصروفات الدورية")}</a></div>
+    <p class="muted small" style="margin:0 0 10px">${T("مبالغ عند العمال تُخصم من رواتبهم — هي جزء من رصيد الشركة مثل الآجل لدى التطبيقات")}.</p>
+    <div class="tbl-wrap"><table><thead><tr><th>${T("العامل")}</th><th>${T("عدد السلف")}</th><th>${T("المتبقي")}</th></tr></thead><tbody>
+    ${d.advances.list.map(w => `<tr><td><b>${esc(w.name || '')}</b></td><td class="n">${w.count}</td><td class="n"><b>${money(w.remaining)}</b></td></tr>`).join('')}
+    </tbody><tfoot><tr><td>${T("الإجمالي")}</td><td></td><td class="n">${money(d.advances.total)}</td></tr></tfoot></table></div></section>` : ''}
   <section class="card"><div class="card-head"><h3>${icon('landmark')}${T("الديون والدائنون")}</h3>${fin || can('settings_manage') ? `<button class="btn sm" id="bCred">${icon('plus')}${T("دائن جديد")}</button>` : ''}</div>
     ${d.debts.list.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("الدائن")}</th><th>${T("أصل الدين")}</th><th>${T("سُدّد")}</th><th>${T("المتبقي")}</th><th>${T("نسبة السداد")}</th><th></th></tr></thead><tbody>
     ${d.debts.list.map(c => { const orig = r2(c.opening_balance + c.added), pct = orig > 0 ? Math.min(100, Math.round(c.paid / orig * 100)) : 0;

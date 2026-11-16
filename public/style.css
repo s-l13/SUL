@@ -958,3 +958,13 @@ tr.mine-row td { background: var(--brand-soft); }
 .fgrid.app-in { margin: 0; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); align-items: end; }
 .fgrid.app-in > label { min-width: 0; }
 .fgrid.app-in input { min-width: 0; width: 100%; }
+
+/* worker advances under a salary */
+.adv-line { margin-top: 4px; color: var(--text); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.adv-line .ic { width: 15px; height: 15px; color: var(--muted); }
+.adv-ded { display: grid; grid-template-columns: minmax(0, 1fr) 120px; align-items: center; gap: 10px; margin-bottom: 6px; }
+
+/* «مصروف جديد»: one-off or recurring */
+.pick-list { display: grid; gap: 10px; }
+.btn.pick { justify-content: flex-start; text-align: start; padding: 12px 14px; height: auto; gap: 12px; }
+.btn.pick .d-block { display: block; font-weight: 400; margin-top: 2px; }

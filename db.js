@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   category_id INTEGER REFERENCES categories(id), creditor_id INTEGER REFERENCES creditors(id), app_id INTEGER REFERENCES delivery_apps(id),
   supplier TEXT, invoice_no TEXT, description TEXT,
   created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL DEFAULT ${NOW},
-  deleted_at TEXT, deleted_by INTEGER REFERENCES users(id)
+  deleted_at TEXT, deleted_by INTEGER REFERENCES users(id), recurring_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_tx_bdate ON transactions(business_id, date);
 CREATE INDEX IF NOT EXISTS ix_tx_shift ON transactions(shift_id);
@@ -247,12 +247,22 @@ CREATE TABLE IF NOT EXISTS recurring_expenses (
   active INTEGER NOT NULL DEFAULT 1, notified_for TEXT, last_paid TEXT, last_amount ${REAL}, note TEXT, created_by INTEGER, deleted_at TEXT,
   created_at TEXT NOT NULL DEFAULT ${NOW}
 );
+-- a worker's advance: the money left with tx_id (type 'advance'); repaid from the salary over its installments (months)
+CREATE TABLE IF NOT EXISTS salary_advances (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), recurring_id INTEGER NOT NULL, tx_id INTEGER NOT NULL,
+  amount ${REAL} NOT NULL, installments INTEGER NOT NULL DEFAULT 1, note TEXT, created_by INTEGER, created_at TEXT NOT NULL DEFAULT ${NOW}, deleted_at TEXT
+);
+-- what was taken off a salary payment (pay_tx_id) for an advance; it counts only while that payment is not deleted
+CREATE TABLE IF NOT EXISTS advance_deductions (
+  id ${ID}, business_id INTEGER NOT NULL REFERENCES businesses(id), advance_id INTEGER NOT NULL, pay_tx_id INTEGER NOT NULL,
+  amount ${REAL} NOT NULL, due TEXT, created_at TEXT NOT NULL DEFAULT ${NOW}
+);
 CREATE TABLE IF NOT EXISTS snapshots (
   id ${ID}, label TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT ${NOW}
 );`;
 // every table, parents before children (used by export / copy / reset)
 const TABLES = ['businesses', 'users', 'user_business', 'sessions', 'delivery_apps', 'categories', 'creditors', 'shifts', 'shift_app_sales', 'transactions', 'tx_items', 'audit_log',
-  'fund_settings', 'fund_categories', 'fund_members', 'fund_rates', 'fund_loans', 'fund_payments', 'fund_loan_requests', 'fund_banners', 'fund_report_requests', 'fund_goals', 'fund_goal_gifts', 'notifications', 'recurring_expenses'];
+  'fund_settings', 'fund_categories', 'fund_members', 'fund_rates', 'fund_loans', 'fund_payments', 'fund_loan_requests', 'fund_banners', 'fund_report_requests', 'fund_goals', 'fund_goal_gifts', 'notifications', 'recurring_expenses', 'salary_advances', 'advance_deductions'];
 
 // SQLite files created by earlier versions: add the columns that came later
 async function migrateSqlite() {
@@ -268,7 +278,7 @@ async function migrateSqlite() {
     addCol('shifts', 'act_card', 'REAL');
     addCol('businesses', 'cashier_counts', 'INTEGER NOT NULL DEFAULT 0');
     addCol('businesses', 'cash_count', 'INTEGER NOT NULL DEFAULT 0');
-    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transactions'").get()) addCol('transactions', 'card_part', 'REAL NOT NULL DEFAULT 0');
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transactions'").get()) { addCol('transactions', 'card_part', 'REAL NOT NULL DEFAULT 0'); addCol('transactions', 'recurring_id', 'INTEGER'); }
     addCol('businesses', 'day_start_hour', 'INTEGER NOT NULL DEFAULT 5');
     addCol('businesses', 'logo', 'TEXT');
     addCol('businesses', 'logo_updated', 'TEXT');
@@ -302,7 +312,7 @@ async function init() {
   if (!PG) await migrateSqlite();
   await engine.exec(SCHEMA);
   // PostgreSQL databases created by earlier versions: add the columns that came later
-  if (PG) await engine.exec('ALTER TABLE businesses ADD COLUMN IF NOT EXISTS open_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS close_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT \'restaurant\'; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS cash_count INTEGER NOT NULL DEFAULT 0; ALTER TABLE transactions ADD COLUMN IF NOT EXISTS card_part DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE shifts ADD COLUMN IF NOT EXISTS act_cash DOUBLE PRECISION; ALTER TABLE shifts ADD COLUMN IF NOT EXISTS act_card DOUBLE PRECISION; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS deceased INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS spouse_id INTEGER; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS mother_id INTEGER; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS guardian_act INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_payments ADD COLUMN IF NOT EXISTS for_month TEXT; ALTER TABLE fund_payments ADD COLUMN IF NOT EXISTS extra INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_banners ADD COLUMN IF NOT EXISTS layout TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_names INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_borrowers INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS motto TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS statement_month TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS impact_page TEXT; ALTER TABLE delivery_apps ADD COLUMN IF NOT EXISTS fee_per_order DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE delivery_apps ADD COLUMN IF NOT EXISTS fee_pct DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE shift_app_sales ADD COLUMN IF NOT EXISTS fee DOUBLE PRECISION NOT NULL DEFAULT 0;');
+  if (PG) await engine.exec('ALTER TABLE businesses ADD COLUMN IF NOT EXISTS open_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS close_time TEXT; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT \'restaurant\'; ALTER TABLE businesses ADD COLUMN IF NOT EXISTS cash_count INTEGER NOT NULL DEFAULT 0; ALTER TABLE transactions ADD COLUMN IF NOT EXISTS card_part DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE shifts ADD COLUMN IF NOT EXISTS act_cash DOUBLE PRECISION; ALTER TABLE shifts ADD COLUMN IF NOT EXISTS act_card DOUBLE PRECISION; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS deceased INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS spouse_id INTEGER; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS mother_id INTEGER; ALTER TABLE fund_members ADD COLUMN IF NOT EXISTS guardian_act INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_payments ADD COLUMN IF NOT EXISTS for_month TEXT; ALTER TABLE fund_payments ADD COLUMN IF NOT EXISTS extra INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_banners ADD COLUMN IF NOT EXISTS layout TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_names INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS show_borrowers INTEGER NOT NULL DEFAULT 0; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS motto TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS statement_month TEXT; ALTER TABLE fund_settings ADD COLUMN IF NOT EXISTS impact_page TEXT; ALTER TABLE delivery_apps ADD COLUMN IF NOT EXISTS fee_per_order DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE delivery_apps ADD COLUMN IF NOT EXISTS fee_pct DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE shift_app_sales ADD COLUMN IF NOT EXISTS fee DOUBLE PRECISION NOT NULL DEFAULT 0; ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recurring_id INTEGER;');
   const { c } = await engine.get('SELECT COUNT(*) c FROM users');
   if (c === 0) {
     await engine.tx(async () => {

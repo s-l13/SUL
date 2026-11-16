@@ -154,7 +154,7 @@ const ALL_PERMS = Object.keys(PERMISSIONS);
 const TX_TYPES = {
   purchase: 'مشتريات', expense: 'مصروف', debt_payment: 'سداد دين', loan: 'تمويل / دين جديد',
   owner_deposit: 'إيداع من المالك', withdrawal: 'مسحوبات المالك', app_settlement: 'تحصيل من تطبيق توصيل', adjustment: 'تسوية رصيد',
-  debt_writeoff: 'إسقاط / تخفيض دين',
+  debt_writeoff: 'إسقاط / تخفيض دين', advance: 'سلفة عامل',
 };
 const METHODS = { drawer: 'كاش من الدرج', company: 'من حساب الشركة', credit: 'آجل (على الدين)' };
 
@@ -171,7 +171,7 @@ function balanceEffect(t) {
 // effect on the cash drawer (for shift reconciliation)
 function drawerEffect(t) {
   if (t.payment_method !== 'drawer') return 0;
-  if (['purchase', 'expense', 'debt_payment', 'withdrawal'].includes(t.type)) return -(t.amount - (t.card_part || 0)); // the part paid by card (شبكة) never left the drawer
+  if (['purchase', 'expense', 'debt_payment', 'withdrawal', 'advance'].includes(t.type)) return -(t.amount - (t.card_part || 0)); // the part paid by card (شبكة) never left the drawer
   if (['loan', 'owner_deposit'].includes(t.type)) return t.amount;
   return 0;
 }
@@ -363,6 +363,8 @@ admin.post('/businesses/:id/reset', wrap(async (req) => {
       shifts: (await db.get('SELECT COUNT(*) n FROM shifts WHERE business_id = ?', b.id)).n,
     };
     await db.run('DELETE FROM tx_items WHERE transaction_id IN (SELECT id FROM transactions WHERE business_id = ?)', b.id);
+    await db.run('DELETE FROM advance_deductions WHERE business_id = ?', b.id);
+    await db.run('DELETE FROM salary_advances WHERE business_id = ?', b.id);
     await db.run('DELETE FROM transactions WHERE business_id = ?', b.id);
     await db.run('DELETE FROM shift_app_sales WHERE shift_id IN (SELECT id FROM shifts WHERE business_id = ?)', b.id);
     await db.run('DELETE FROM shifts WHERE business_id = ?', b.id);
@@ -644,11 +646,17 @@ async function movement(b, from, to) {
     withdrawals: sum(x => x.type === 'withdrawal'),
     adjustments: sum(x => x.type === 'adjustment'),
     app_collected: sum(x => x.type === 'app_settlement'),
+    advances_given: sum(x => x.type === 'advance'),
     app_fees_auto: r2(appRows.reduce((t, a) => t + a.fee, 0)), // booked at closing from each company's rates
     app_commission: r2(txs.filter(x => x.type === 'app_settlement').reduce((t, x) => t + x.fee, 0) + appRows.reduce((t, a) => t + a.fee, 0)),
     cash_out: r2(-txs.reduce((t, x) => t + drawerEffect(x), 0)), // paid in cash from the drawer (net of money put in)
     card_paid: r2(txs.filter(x => x.payment_method === 'drawer').reduce((t, x) => t + (x.card_part || 0), 0)),
   };
+  const rp = await db.all(`SELECT t.id, t.date, t.amount, COALESCE(r.name, t.description) name,
+      (SELECT COALESCE(SUM(d.amount), 0) FROM advance_deductions d WHERE d.pay_tx_id = t.id) deducted
+    FROM transactions t LEFT JOIN recurring_expenses r ON r.id = t.recurring_id
+    WHERE t.business_id = ? AND t.deleted_at IS NULL AND t.recurring_id IS NOT NULL AND t.date BETWEEN ? AND ? ORDER BY t.date, t.id`, b.id, from, to);
+  m.recurring_paid = { list: rp.map(x => ({ ...x, deducted: r2(x.deducted), net: r2(x.amount - x.deducted) })), total: r2(rp.reduce((s, x) => s + x.amount, 0)), deducted: r2(rp.reduce((s, x) => s + x.deducted, 0)) };
   m.cash_net = r2(m.sales.cash - m.cash_out); // the day's cash to hand over (on top of the fixed float)
   m.net_movement = r2(total - m.card_fee - m.app_fees_auto + m.cash_diff + txs.reduce((t, x) => t + balanceEffect(x), 0));
   // operating result (accrual): sales - fees - commissions - all purchases & expenses (incl. on credit)
@@ -1065,10 +1073,11 @@ biz.get('/shifts/:id', wrap(async (req) => {
 }));
 
 // ---------- transactions ----------
-async function validateTx(req, x, existing) {
+async function validateTx(req, x, existing, internal = false) {
   const can = req.can;
   const type = x.type;
   if (!TX_TYPES[type]) bad('نوع الحركة غير صحيح');
+  if (type === 'advance' && !internal) bad('سلفة العامل تُسجّل من «المصروفات الدورية» عند راتب العامل');
   const finance = can('finance_manage');
   if (!finance && !['purchase', 'expense'].includes(type)) bad('ليس لديك صلاحية لهذا النوع من الحركات');
   let method = x.payment_method || 'drawer';
@@ -1076,6 +1085,7 @@ async function validateTx(req, x, existing) {
   if (!finance && method !== 'drawer') bad('يمكنك تسجيل الحركات المدفوعة من الدرج فقط');
   if (method === 'credit' && !['purchase', 'expense'].includes(type)) bad('الدفع الآجل متاح للمشتريات والمصروفات فقط');
   if (['app_settlement', 'adjustment', 'debt_writeoff'].includes(type)) method = 'company';
+  if (type === 'advance' && !['company', 'drawer'].includes(method)) bad('طريقة الدفع غير صحيحة');
 
   // itemized invoice: amount is the sum of the lines
   let items = null;
@@ -1215,6 +1225,7 @@ async function canModify(req, t) {
 biz.put('/transactions/:id', wrap(async (req) => {
   const old = await getTx(req);
   await canModify(req, old);
+  if (old.type === 'advance') bad('سلفة العامل لا تُعدّل — احذفها وسجّلها من جديد من «المصروفات الدورية»');
   old.items = await loadItems(old.id);
   // items omitted → keep existing lines; items: [] → drop them and use the typed amount
   const body = { ...old, ...req.body };
@@ -1233,14 +1244,28 @@ biz.put('/transactions/:id', wrap(async (req) => {
 biz.delete('/transactions/:id', wrap(async (req) => {
   const t = await getTx(req);
   await canModify(req, t);
+  if (t.type === 'advance') await advanceDeletable(t.id);
   await db.tx(async () => {
     await db.run('UPDATE transactions SET deleted_at = ?, deleted_by = ? WHERE id = ?', nowLocal(), req.user.id, t.id);
+    if (t.type === 'advance') await db.run('UPDATE salary_advances SET deleted_at = ? WHERE tx_id = ?', nowLocal(), t.id);
     await recomputeShift(t.shift_id);
   });
-  await audit(req.biz.id, req.user.id, 'tx_delete', { id: t.id, before: await txSnap(t) });
-  return { ok: true };
+  // the latest payment of a salary / recurring expense deleted: its due date comes back
+  const undo = t.recurring_id ? await undoRecurringPay(req, t) : null;
+  await audit(req.biz.id, req.user.id, 'tx_delete', { id: t.id, before: await txSnap(t), ...(undo ? { recurring_due_back: undo } : {}) });
+  return { ok: true, recurring_due: undo || undefined };
 }));
 
+async function undoRecurringPay(req, t) {
+  const r = await db.get('SELECT * FROM recurring_expenses WHERE id = ? AND business_id = ? AND deleted_at IS NULL', t.recurring_id, req.biz.id);
+  if (!r) return null;
+  const d = (await db.all("SELECT details FROM audit_log WHERE business_id = ? AND action = 'recurring_pay'", req.biz.id))
+    .map(l => { try { return JSON.parse(l.details || '{}'); } catch { return {}; } }).find(x => idOf(x.tx_id) === t.id);
+  if (!d || !isDate(d.due) || d.next_due !== r.next_due) return null; // a later payment was made, or the date was changed by hand
+  const last = await db.get('SELECT date, amount FROM transactions WHERE recurring_id = ? AND deleted_at IS NULL ORDER BY date DESC, id DESC LIMIT 1', r.id);
+  await db.run('UPDATE recurring_expenses SET next_due = ?, notified_for = NULL, last_paid = ?, last_amount = ? WHERE id = ?', d.due, last ? last.date : null, last ? last.amount : null, r.id);
+  return d.due;
+}
 // ---------- recurring expenses: salary every month, something every few months, a yearly fee ----------
 // each one has its next due date; a reminder goes out before it, and "paid" records the expense from the company account
 // and moves the due date one cycle forward.
@@ -1288,7 +1313,71 @@ biz.get('/recurring', need('balance_view', 'tx_view_all', 'finance_manage'), wra
   const t = await dayNow(req.biz);
   const rows = await db.all(`SELECT r.*, c.name category_name FROM recurring_expenses r LEFT JOIN categories c ON c.id = r.category_id
     WHERE r.business_id = ? AND r.deleted_at IS NULL ORDER BY r.active DESC, r.next_due, r.id`, req.biz.id);
-  return { today: t, items: rows.map(r => ({ ...r, ...recStatus(r, t) })) };
+  const adv = await advancesOf(req.biz.id);
+  return { today: t, items: rows.map(r => { const a = adv.filter(x => x.recurring_id === r.id);
+    return { ...r, ...recStatus(r, t), advances: a, advances_left: r2(a.reduce((s, x) => s + x.remaining, 0)), next_deduction: r2(a.reduce((s, x) => s + x.next, 0)) }; }) };
+}));
+// ---------- worker advances ----------
+// each live advance (its money movement not deleted) with what was repaid (from salary payments not deleted)
+async function advancesOf(bid, date = MAX_DATE) {
+  const rows = await db.all(`SELECT a.*, t.date, t.payment_method, r.name worker FROM salary_advances a JOIN transactions t ON t.id = a.tx_id AND t.deleted_at IS NULL
+    LEFT JOIN recurring_expenses r ON r.id = a.recurring_id WHERE a.business_id = ? AND a.deleted_at IS NULL AND t.date <= ? ORDER BY t.date, a.id`, bid, date);
+  const ded = await db.all(`SELECT d.advance_id, SUM(d.amount) v, COUNT(*) n FROM advance_deductions d JOIN transactions p ON p.id = d.pay_tx_id AND p.deleted_at IS NULL
+    WHERE d.business_id = ? AND p.date <= ? GROUP BY d.advance_id`, bid, date);
+  return rows.map(a => {
+    const d = ded.find(x => x.advance_id === a.id) || {}, paid = r2(d.v || 0), remaining = r2(a.amount - paid), n = d.n || 0;
+    const inst = r2(a.amount / a.installments);
+    // the next salary takes one instalment; the last one takes whatever is left (no cents lost to rounding)
+    const next = remaining <= 0.004 ? 0 : n >= a.installments - 1 ? remaining : Math.min(inst, remaining);
+    return { id: a.id, recurring_id: a.recurring_id, worker: a.worker, date: a.date, payment_method: a.payment_method, amount: a.amount, installments: a.installments,
+      installment: inst, paid, deductions: n, remaining: Math.max(0, remaining), next: r2(next), note: a.note, tx_id: a.tx_id };
+  });
+}
+async function advancesTotal(bid, date = MAX_DATE) {
+  const list = (await advancesOf(bid, date)).filter(a => a.remaining > 0.004);
+  const by = new Map();
+  for (const a of list) { const w = by.get(a.recurring_id) || { recurring_id: a.recurring_id, name: a.worker, remaining: 0, count: 0 }; w.remaining = r2(w.remaining + a.remaining); w.count++; by.set(a.recurring_id, w); }
+  return { list: [...by.values()], total: r2(list.reduce((s, a) => s + a.remaining, 0)) };
+}
+async function advanceDeletable(txId) {
+  const n = (await db.get(`SELECT COUNT(*) n FROM advance_deductions d JOIN salary_advances a ON a.id = d.advance_id JOIN transactions p ON p.id = d.pay_tx_id AND p.deleted_at IS NULL
+    WHERE a.tx_id = ?`, txId)).n;
+  if (n) bad('خُصم جزء من هذه السلفة من الراتب — لا يمكن حذفها (احذف سداد الراتب أولاً إن كان خطأ)');
+}
+biz.post('/recurring/:id/advances', need('finance_manage'), wrap(async (req) => {
+  const r = await getRec(req);
+  const x = req.body || {};
+  const amount = r2(num(x.amount));
+  if (!(amount > 0)) bad('أدخل مبلغ السلفة');
+  const installments = Math.round(num(x.installments || 1));
+  if (!(installments >= 1 && installments <= 120)) bad('عدد الأشهر يجب أن يكون بين 1 و120');
+  const method = x.payment_method === 'drawer' ? 'drawer' : 'company';
+  const t = await dayNow(req.biz);
+  if (x.date && isDate(x.date) && x.date > t) bad('التاريخ لا يمكن أن يكون في المستقبل');
+  const note = String(x.note || '').trim().slice(0, 300) || null;
+  const desc = `سلفة — ${r.name}${installments > 1 ? ` — مقسطة على ${installments} شهر` : ' — تُخصم من الراتب القادم'}${note ? ' — ' + note : ''}`;
+  const id = await db.tx(async () => {
+    const tx = await validateTx(req, { type: 'advance', payment_method: method, amount, date: x.date, description: desc }, null, true);
+    const txId = await insertTx(req, tx);
+    return db.insert('INSERT INTO salary_advances (business_id, recurring_id, tx_id, amount, installments, note, created_by) VALUES (?,?,?,?,?,?,?)',
+      req.biz.id, r.id, txId, amount, installments, note, req.user.id);
+  });
+  await audit(req.biz.id, req.user.id, 'advance_create', { id, name: r.name, amount, installments, method });
+  return { id };
+}));
+biz.delete('/advances/:id', need('finance_manage'), wrap(async (req) => {
+  const a = await db.get('SELECT a.*, r.name worker FROM salary_advances a LEFT JOIN recurring_expenses r ON r.id = a.recurring_id WHERE a.id = ? AND a.business_id = ? AND a.deleted_at IS NULL', idOf(req.params.id), req.biz.id);
+  if (!a) throw new HttpError(404, 'السلفة غير موجودة');
+  await advanceDeletable(a.tx_id);
+  const t = await db.get('SELECT * FROM transactions WHERE id = ?', a.tx_id);
+  const now = nowLocal();
+  await db.tx(async () => {
+    await db.run('UPDATE transactions SET deleted_at = ?, deleted_by = ? WHERE id = ? AND deleted_at IS NULL', now, req.user.id, a.tx_id);
+    await db.run('UPDATE salary_advances SET deleted_at = ? WHERE id = ?', now, a.id);
+    if (t) await recomputeShift(t.shift_id);
+  });
+  await audit(req.biz.id, req.user.id, 'advance_delete', { id: a.id, name: a.worker, amount: a.amount, installments: a.installments });
+  return { ok: true };
 }));
 biz.post('/recurring', need('finance_manage', 'settings_manage'), wrap(async (req) => {
   const o = await recClean(req, req.body || {});
@@ -1324,16 +1413,33 @@ biz.post('/recurring/:id/pay', need('finance_manage'), wrap(async (req) => {
   if (date > t) bad('تاريخ السداد لا يمكن أن يكون في المستقبل');
   const amount = x.amount === undefined || x.amount === '' ? r.amount : num(x.amount);
   const next = monthsAfter(r.next_due, r.every, r.due_day);
-  const desc = `${r.name} — ${r.next_due}${x.note ? ' — ' + String(x.note).trim().slice(0, 300) : ''}`;
+  // the worker's advances given up to the payment date: by default each takes its instalment
+  const adv = (await advancesOf(req.biz.id)).filter(a => a.recurring_id === r.id && a.remaining > 0.004 && a.date <= date);
+  const asked = Array.isArray(x.deductions) ? x.deductions : null;
+  const deds = adv.map(a => {
+    const d = asked ? asked.find(y => idOf(y.advance_id) === a.id) : null;
+    const v = asked ? (d ? r2(num(d.amount || 0)) : 0) : a.next;
+    if (!(v >= 0) || v > a.remaining + 0.005) bad('خصم السلفة أكبر من المتبقي منها ({remaining})', { remaining: a.remaining.toFixed(2) });
+    return { advance_id: a.id, amount: v };
+  }).filter(d => d.amount > 0);
+  const dedTotal = r2(deds.reduce((s, d) => s + d.amount, 0));
+  if (dedTotal > r2(amount) + 0.005) bad('خصم السلف أكبر من الراتب');
+  const balBefore = req.can('balance_view') ? await balanceAsOf(req.biz, MAX_DATE) : undefined;
+  const desc = `${r.name} — ${r.next_due}${dedTotal ? ` — خصم سلفة ${dedTotal.toFixed(2)} — المدفوع فعلاً ${r2(amount - dedTotal).toFixed(2)}` : ''}${x.note ? ' — ' + String(x.note).trim().slice(0, 300) : ''}`;
   const id = await db.tx(async () => {
     const tx = await validateTx(req, { type: 'expense', payment_method: 'company', amount, category_id: r.category_id, description: desc, date });
     const id = await insertTx(req, tx);
+    await db.run('UPDATE transactions SET recurring_id = ? WHERE id = ?', r.id, id);
+    for (const d of deds) await db.run('INSERT INTO advance_deductions (business_id, advance_id, pay_tx_id, amount, due) VALUES (?,?,?,?,?)', req.biz.id, d.advance_id, id, d.amount, r.next_due);
     await db.run('UPDATE recurring_expenses SET next_due = ?, notified_for = NULL, last_paid = ?, last_amount = ? WHERE id = ?', next, date, tx.amount, r.id);
     return id;
   });
-  await audit(req.biz.id, req.user.id, 'recurring_pay', { id: r.id, name: r.name, amount: r2(amount), due: r.next_due, date, next_due: next, tx_id: id });
+  await audit(req.biz.id, req.user.id, 'recurring_pay', { id: r.id, name: r.name, amount: r2(amount), deducted: dedTotal || undefined, net: dedTotal ? r2(amount - dedTotal) : undefined, due: r.next_due, date, next_due: next, tx_id: id });
   remindRecurring(req.biz.id).catch(() => { });
-  return { ok: true, tx_id: id, next_due: next };
+  const left = (await advancesOf(req.biz.id)).filter(a => a.recurring_id === r.id);
+  return { ok: true, tx_id: id, next_due: next, name: r.name, due: r.next_due, date, amount: r2(amount), deducted: dedTotal, net: r2(amount - dedTotal),
+    advances_left: r2(left.reduce((s, a) => s + a.remaining, 0)),
+    balance_before: balBefore, balance_after: balBefore === undefined ? undefined : await balanceAsOf(req.biz, MAX_DATE) };
 }));
 // not paid this time (e.g. no salary that month): move to the next cycle without recording anything
 biz.post('/recurring/:id/skip', need('finance_manage'), wrap(async (req) => {
@@ -1364,7 +1470,7 @@ async function remindRecurring(onlyBid) {
 app.locals.remindRecurring = remindRecurring;
 
 // ---------- edits log ----------
-const EDIT_ACTIONS = [...mountFund.FUND_EDIT_ACTIONS, 'recurring_update', 'recurring_delete', 'recurring_skip', 'tx_update', 'tx_delete', 'shift_edit', 'shift_reopen', 'cash_receive', 'settings_update', 'apps_update', 'categories_update', 'creditors_update', 'creditors_delete', 'logo_update'];
+const EDIT_ACTIONS = [...mountFund.FUND_EDIT_ACTIONS, 'recurring_update', 'recurring_delete', 'recurring_skip', 'advance_delete', 'tx_update', 'tx_delete', 'shift_edit', 'shift_reopen', 'cash_receive', 'settings_update', 'apps_update', 'categories_update', 'creditors_update', 'creditors_delete', 'logo_update'];
 biz.get('/audit', need('audit_view'), wrap(async (req) => {
   const to = isDate(req.query.to) ? req.query.to : today();
   const from = isDate(req.query.from) ? req.query.from : addDays(to, -30);
@@ -1412,7 +1518,7 @@ biz.get('/reports/daily', need('reports_view'), wrap(async (req) => {
     LEFT JOIN users u ON u.id = t.created_by WHERE t.business_id = ? AND t.date = ? AND t.deleted_at IS NULL ORDER BY t.id`, b.id, date);
   return {
     business: b.name, date, card_fee_pct: b.card_fee_pct, movement: m, prev_balance: prevBalance, end_balance: endBalance,
-    receivables, debts, debts_day: await debtsPeriod(b.id, date, date), coverage: debts.total > 0 ? r2(endBalance / debts.total * 100) : null, net_position: r2(endBalance - debts.total),
+    receivables, debts, advances: await advancesTotal(b.id, date), debts_day: await debtsPeriod(b.id, date, date), coverage: debts.total > 0 ? r2(endBalance / debts.total * 100) : null, net_position: r2(endBalance - debts.total),
     shifts, transactions: await attachItems(txs), open_shifts: shifts.filter(s => s.status === 'open').length,
   };
 }));
@@ -1443,7 +1549,7 @@ biz.get('/reports/period', need('reports_view'), wrap(async (req) => {
 }));
 
 biz.get('/balances', need('balance_view'), wrap(async (req) => ({
-  balance: await balanceAsOf(req.biz, MAX_DATE), receivables: await receivablesAsOf(req.biz.id, MAX_DATE), debts: await debtsAsOf(req.biz.id, MAX_DATE),
+  balance: await balanceAsOf(req.biz, MAX_DATE), receivables: await receivablesAsOf(req.biz.id, MAX_DATE), debts: await debtsAsOf(req.biz.id, MAX_DATE), advances: await advancesTotal(req.biz.id),
 })));
 
 mountFund(app, biz, { db, wrap, need, bad, HttpError, audit, r2, num, idOf, today, nowLocal, isDate, bcrypt, PW_MIN, DEFAULT_PASSWORD, notifyUsers, usersWith });
@@ -1494,7 +1600,14 @@ async function adminRecovery() {
 // ───────────────────────── start ─────────────────────────
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0'; // on a VPS: HOST=127.0.0.1 so only the HTTPS proxy can reach it
-db.init().then(adminRecovery).then(() => {
+async function linkRecurringPays() {
+  const rows = await db.all("SELECT business_id, details FROM audit_log WHERE action = 'recurring_pay'");
+  for (const r of rows) {
+    let d; try { d = JSON.parse(r.details || '{}'); } catch { continue; }
+    if (idOf(d.tx_id) && idOf(d.id)) await db.run("UPDATE transactions SET recurring_id = ? WHERE id = ? AND business_id = ? AND type = 'expense' AND recurring_id IS NULL", idOf(d.id), idOf(d.tx_id), r.business_id);
+  }
+}
+db.init().then(adminRecovery).then(linkRecurringPays).then(() => {
   // monthly statements of the family fund: checked soon after start, then every hour
   const stmt = () => app.locals.fundStatements().catch(e => console.error('statements failed:', e.message));
   setTimeout(stmt, 20e3); setInterval(stmt, 3600e3);
