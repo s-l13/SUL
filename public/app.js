@@ -648,7 +648,7 @@ function bindTxForm(form, { tx = null, onSaved } = {}) {
     };
     for (const [k, v] of Object.entries(show)) $(`[data-f="${k}"]`, form).hidden = !v;
     $('[data-amt-l]', form).textContent = type === 'app_settlement' ? T("المبلغ الواصل (الصافي)") : type === 'adjustment' ? T("مبلغ التسوية (+/−)") : T("المبلغ");
-    form.amount.min = type === 'adjustment' ? '' : '0.01';
+    form.amount.min = type === 'adjustment' ? '' : type === 'app_settlement' ? '0' : '0.01';
     const h = TX_HINT[type];
     $('[data-hint]', form).textContent = typeof h === 'object' ? (h[method] || '') : h || '';
   };
@@ -722,6 +722,15 @@ function daySums(txs) {
 // what drops down under a day's total: cash from the drawer, card, company account, on credit
 const sumsPop = (x) => `<div class="cpop c-sums">${[[T("كاش من الدرج"), x.cash, x.n.cash], [T("شبكة"), x.card, x.n.card], [T("من حساب الشركة"), x.company, x.n.company], [T("آجل"), x.credit, x.n.credit], [T("أخرى"), x.other, 0]]
   .filter(([l, v], i) => i < 2 || Math.abs(v) > 0.004).map(([l, v, n]) => `<div><span>${l}${n ? ` <small class="muted">(${n === 2 ? T("فاتورتان") : `${n} ${n > 2 && n < 11 ? T("فواتير") : T("فاتورة")}`})</small>` : ''}</span><b class="num">${money(v)}</b></div>`).join('')}</div>`;
+const feeRule = (a) => [a && a.fee_per_order > 0 ? `${money(a.fee_per_order)} ${T("لكل طلب")}` : '', a && a.fee_pct > 0 ? `${a.fee_pct}%` : ''].filter(Boolean).join(' + ');
+const appFeeOf = (a, amount, orders) => a ? Math.min(amount, r2((orders || 0) * (a.fee_per_order || 0) + amount * (a.fee_pct || 0) / 100)) : 0;
+const appFields = (apps, val, wrap) => apps.map(a => { const v = val(a.id) || {}, rule = feeRule(S.meta.apps.find(x => x.id === a.id));
+  const h = `<label><span>${esc(T(a.name))}${rule ? ` <span class="opt">(${T("رسوم")} ${rule})</span>` : ''}</span><input data-app="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0" value="${v.amount || ''}"></label>
+    <label><span>${wrap ? T("عدد الطلبات") : `${T("عدد طلبات")} ${esc(T(a.name))}`} <span class="opt">${T("(اختياري)")}</span></span><input data-ord="${a.id}" type="number" step="1" min="0" inputmode="numeric" placeholder="0" value="${v.orders || ''}"></label>`;
+  return wrap ? `<div class="fgrid app-in">${h}</div>` : h; }).join('');
+const appRowsOf = (f) => $$('[data-app]', f).map(i => { const id = Number(i.dataset.app), a = S.meta.apps.find(x => x.id === id), amount = r2(i.value), o = $(`[data-ord="${id}"]`, f);
+  const orders_count = Math.max(0, parseInt(o && o.value) || 0); return { app_id: id, amount, orders_count, name: a ? a.name : '', fee: appFeeOf(a, amount, orders_count) }; });
+const appSend = (rows) => rows.map(({ app_id, amount, orders_count }) => ({ app_id, amount, orders_count }));
 const payTag = (t) => !t.card_part ? '' : t.card_part >= t.amount ? ` <span class="badge muted">${icon('card')}${T("شبكة")}</span>` : ` <span class="badge muted">${T("كاش")} ${money(r2(t.amount - t.card_part))} + ${T("شبكة")} ${money(t.card_part)}</span>`;
 const txDesc = (t) => [t.category_name && T(t.category_name), t.supplier, t.app_name && T(t.app_name), t.creditor_name, t.description].filter(Boolean).map(esc).join(' · ') + payTag(t);
 const signedAmount = (t) => {
@@ -789,7 +798,7 @@ async function vCashier(el) {
   const mode = lsGet('buyMode', 'total');
   const reload = (t) => { vCashier.tab = t; vCashier(el); };
   const val = (k) => done ? d.shift[k] : '';
-  const appVal = (id) => { const a = done && d.shift.apps.find(x => x.app_id === id); return a && a.amount ? a.amount : ''; };
+  const appVal = (id) => { const a = done && d.shift.apps.find(x => x.app_id === id); return a ? { amount: a.amount, orders: a.orders_count } : null; };
   const counting = !!S.meta.business.cash_count, counts = counting && !!S.meta.business.cashier_counts;
   const float = sh ? sh.opening_float : (d.cash_float || 0);
   const apps = S.meta.apps.filter(a => a.active);
@@ -821,7 +830,7 @@ async function vCashier(el) {
       <label class="big"><span class="lbl-ic">${icon('cash')}${T("كاش")}</span><input name="cash_sales" type="number" step="0.01" min="0" inputmode="decimal" required value="${val('cash_sales')}"></label>
       <label class="big"><span class="lbl-ic">${icon('card')}${T("شبكة")}</span><input name="card_sales" type="number" step="0.01" min="0" inputmode="decimal" required value="${val('card_sales')}"></label>
       <div class="sec-title">${icon('truck')}<span class="grow">${T("تطبيقات التوصيل")}</span>${can('settings_manage') ? `<a class="btn sm ghost" href="#/settings/apps">${icon('sliders')}${T("إضافة / تعديل / إخفاء")}</a>` : ''}</div>
-      ${apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0" value="${appVal(a.id)}"></label>`).join('') || ("<p class=\"muted small\">" + T("لا توجد تطبيقات ظاهرة") + "</p>")}
+      ${appFields(apps, appVal, true) || ("<p class=\"muted small\">" + T("لا توجد تطبيقات ظاهرة") + "</p>")}
       <label><span>${T("عدد الطلبات")} <span class="opt">${T("(اختياري)")}</span></span><input name="orders_count" type="number" min="0" step="1" inputmode="numeric" value="${done && d.shift.orders_count ? d.shift.orders_count : ''}"></label>
       ${!counting ? `<div class="fgrid">${actualFields(done ? d.shift : null)}</div><p class="muted small" style="margin:-4px 0 10px">${T("عُدّ الدرج الآن كما هو مع العهدة الثابتة، واكتب إجمالي جهاز الشبكة — النظام يقارن الإجمالي ويبيّن مكان أي فرق")}.</p>` : ''}
       ${day && counting ? `<label><span>${T("النقد المستلم فعلياً")} <span class="opt">${T("(اختياري)")}</span></span><input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" value="${done && d.shift.counted_at ? d.shift.counted_cash : ''}"></label>` : counts ? `<label class="big">${T("النقد الموجود في الدرج")}<input name="counted_cash" type="number" step="0.01" min="0" inputmode="decimal" required></label>` : ''}
@@ -848,15 +857,16 @@ async function vCashier(el) {
   // in − out calculation shown live while typing the closing figures
   const showCash = !counts || can('shift_view_expected');
   const read = () => {
-    const appRows = $$('[data-app]', fc).map(i => ({ app_id: Number(i.dataset.app), amount: r2(i.value), name: S.meta.apps.find(a => a.id == i.dataset.app).name }));
+    const appRows = appRowsOf(fc);
     const cash = r2(fc.cash_sales.value), card = r2(fc.card_sales.value), appsT = r2(appRows.reduce((t, a) => t + a.amount, 0));
-    return { appRows, cash, card, appsT, total: r2(cash + card + appsT) };
+    return { appRows, cash, card, appsT, appFees: r2(appRows.reduce((t, a) => t + a.fee, 0)), total: r2(cash + card + appsT) };
   };
   const draw = () => {
     const x = read();
     $('#io').innerHTML = `
       <div class="io-sec in"><div class="io-h">${icon('arrowDown')}${T("الداخل (المبيعات)")}</div>
         <div class="r"><span>${T("كاش")}</span>${M(x.cash)}</div><div class="r"><span>${T("شبكة")}</span>${M(x.card)}</div><div class="r"><span>${T("تطبيقات (آجل)")}</span>${M(x.appsT)}</div>
+        ${x.appFees ? `<div class="r small muted"><span>${T("منها رسوم شركات التوصيل")} −</span>${M(x.appFees)}</div>` : ''}
         <div class="r t"><span>${T("إجمالي الداخل")}</span>${M(x.total)}</div></div>
       <div class="io-sec outs"><div class="io-h">${icon('arrowUp')}${T("الخارج (المشتريات)")}</div>
         <div class="r"><span>${txs.length} ${txs.length === 1 ? T("فاتورة") : T("فواتير")} ${T("من الدرج")}</span>${M(out)}</div></div>
@@ -871,7 +881,8 @@ async function vCashier(el) {
     const x = read();
     const ok = await confirmBox(T("تأكيد إقفال اليوم"), `<div class="summary-box">
       <div class="r"><span class="lbl-ic">${icon('cash')}${T("كاش")}</span>${M(x.cash)}</div><div class="r"><span class="lbl-ic">${icon('card')}${T("شبكة")}</span>${M(x.card)}</div>
-      ${x.appRows.filter(a => a.amount).map(a => `<div class="r"><span class="lbl-ic">${icon('truck')}${esc(T(a.name))}</span>${M(a.amount)}</div>`).join('')}
+      ${x.appRows.filter(a => a.amount).map(a => `<div class="r"><span class="lbl-ic">${icon('truck')}${esc(T(a.name))}${a.orders_count ? ` <span class="muted small">(${a.orders_count} ${T("طلب")})</span>` : ''}</span>${M(a.amount)}</div>`).join('')}
+      ${x.appFees ? `<div class="r small muted"><span>${T("رسوم شركات التوصيل")} −</span>${M(x.appFees)}</div>` : ''}
       <div class="r t"><span>${T("إجمالي المبيعات")}</span>${M(x.total)}</div>
       <div class="r"><span>${T("المشتريات")}</span>${M(out)}</div>
       ${showCash ? `<div class="r t"><span>${T("الكاش بعد المشتريات")}</span>${M(r2(x.cash - out))}</div>` : ''}
@@ -881,7 +892,7 @@ async function vCashier(el) {
       <p class="muted small">${day ? T("يوم العمل") + ' ' + fmtDate(day) : T("تأكد من الأرقام — لا يمكنك تعديلها بعد الإقفال") + '.'}</p>`, done ? T("نعم، احفظ") : T("نعم، أقفل اليوم"));
     if (!ok) return;
     busy($('button.primary', fc), async () => {
-      const body = { ...formObj(fc), apps: x.appRows.map(({ app_id, amount }) => ({ app_id, amount })) };
+      const body = { ...formObj(fc), apps: appSend(x.appRows) };
       if (day) await bapi('/shifts/close-day', { method: 'POST', body: { ...body, date: day } });
       else await bapi('/shifts/close-current', { method: 'POST', body });
       await loadMeta();
@@ -1238,8 +1249,9 @@ async function shiftDetail(id, after) {
     </div>
     ${s.status === 'closed' ? `<div class="grid two"><div><h4>${T("المبيعات")}</h4><div class="summary-box">
       <div class="r"><span>${T("نقدي")}</span>${M(s.cash_sales)}</div><div class="r"><span>${T("بطاقة")}</span>${M(s.card_sales)}</div>
-      ${s.apps.filter(a => a.amount).map(a => `<div class="r"><span>${esc(T(a.name))}</span>${M(a.amount)}</div>`).join('')}
+      ${s.apps.filter(a => a.amount).map(a => `<div class="r"><span>${esc(T(a.name))}${a.orders_count ? ` <span class="muted small">(${a.orders_count} ${T("طلب")})</span>` : ''}</span>${M(a.amount)}</div>`).join('')}
       <div class="r t"><span>${T("الإجمالي")}</span>${M(shiftTotal(s))}</div>
+      ${s.apps.some(a => a.fee) ? `<div class="r"><span>${T("رسوم شركات التوصيل")}</span>${M(r2(s.apps.reduce((t, a) => t + (a.fee || 0), 0)))}</div>` : ''}
       <div class="r"><span>${T("عدد الطلبات")}</span><span>${s.orders_count}</span></div><div class="r"><span>${T("رسوم البطاقة")}</span>${M(s.card_fee)}</div></div></div>
       <div><h4>${T("النقد")}</h4><div class="summary-box">
       <div class="r"><span>${T("العهدة")}</span>${M(s.opening_float)}</div><div class="r"><span>+ ${T("كاش المبيعات")}</span>${M(s.cash_sales)}</div><div class="r"><span>− ${T("مدفوع كاش من الدرج")}</span>${M(s.drawer_out)}</div>
@@ -1284,7 +1296,7 @@ function closeOpenShift(s, after) {
     <div class="fgrid">
       <label>${T("نقدي")}<input name="cash_sales" type="number" step="0.01" inputmode="decimal" required></label>
       <label>${T("بطاقة / شبكة")}<input name="card_sales" type="number" step="0.01" min="0" inputmode="decimal" required></label>
-      ${apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"></label>`).join('')}
+      ${appFields(apps, () => null)}
       <label>${T("عدد الطلبات")} <input name="orders_count" type="number" min="0" step="1" inputmode="numeric"></label>
       ${counting ? `<label>${T("النقد المستلم فعلياً")} <span class="opt">${T("(اختياري)")}</span><input name="counted_cash" type="number" step="0.01" inputmode="decimal"></label>` : actualFields()}
       <label class="full">${T("ملاحظات")}<input name="notes"></label>
@@ -1301,7 +1313,7 @@ function closeOpenShift(s, after) {
   };
   f.oninput = draw; draw();
   f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
-    const body = { ...formObj(f), apps: $$('[data-app]', f).map(i => ({ app_id: Number(i.dataset.app), amount: r2(i.value) })) };
+    const body = { ...formObj(f), apps: appSend(appRowsOf(f)) };
     await bapi(`/shifts/${s.id}/close`, { method: 'POST', body });
     m.close(); await loadMeta(); toast(`${T("تم إقفال يوم")} ${fmtDate(s.date)}`, 'ok'); after();
   }); };
@@ -1347,7 +1359,7 @@ function editShift(s, after) {
       <label>${T("يوم العمل")}<input type="date" name="date" value="${s.date}" required></label>
       <label>${T("نقدي")}<input name="cash_sales" type="number" step="0.01" required value="${s.cash_sales}"></label>
       <label>${T("بطاقة / شبكة")}<input name="card_sales" type="number" step="0.01" min="0" required value="${s.card_sales}"></label>
-      ${s.apps.map(a => `<label>${esc(T(a.name))}<input data-app="${a.app_id}" type="number" step="0.01" min="0" value="${a.amount || ''}" placeholder="0"></label>`).join('')}
+      ${appFields(s.apps.map(a => ({ ...a, id: a.app_id })), (id) => { const a = s.apps.find(x => x.app_id === id); return a && { amount: a.amount, orders: a.orders_count }; })}
       <label>${T("عدد الطلبات")}<input name="orders_count" type="number" min="0" step="1" value="${s.orders_count}"></label>
       ${s.counted_at && !S.meta.business.cash_count ? `<label class="check full"><input type="checkbox" name="clear_count" value="1"> ${T("حذف نتيجة العدّ القديمة لهذا اليوم (العجز / الزيادة)")} — ${diffBadge(s.difference)}</label>` : ''}
       ${s.counted_at && S.meta.business.cash_count ? `<label>${T("النقد المستلم / المعدود")}<input name="counted_cash" type="number" step="0.01" value="${s.counted_cash}"></label>
@@ -1361,7 +1373,7 @@ function editShift(s, after) {
   f.onsubmit = (e) => {
     e.preventDefault();
     busy(e.submitter, async () => {
-      await bapi('/shifts/' + s.id, { method: 'PUT', body: { ...formObj(f), apps: $$('[data-app]', f).map(i => ({ app_id: Number(i.dataset.app), amount: r2(i.value) })) } });
+      await bapi('/shifts/' + s.id, { method: 'PUT', body: { ...formObj(f), apps: appSend(appRowsOf(f)) } });
       m.close(); toast(T("تم حفظ التعديل"), 'ok'); after();
     });
   };
@@ -1392,7 +1404,7 @@ const AUDIT_ACTIONS = {
   cash_receive: [T("استلام النقد"), 'info'], settings_update: [T("تعديل الإعدادات"), 'warn'], logo_update: [T("تغيير الشعار"), 'warn'],
   theme_update: [T("تغيير المظهر"), 'muted'], business_reset: [T("تصفير بيانات النشاط"), 'neg'],
   login: [T("تسجيل دخول"), 'muted'], password_reset_request: [T("طلب استعادة كلمة المرور"), 'warn'], login_failed: [T("محاولة دخول فاشلة"), 'neg'], password_change: [T("تغيير كلمة المرور"), 'warn'], shift_delete: [T("حذف إقفال"), 'neg'], admin_recovery: [T("استعادة كلمة مرور المالك من الاستضافة"), 'neg'], backup_download: [T("تنزيل نسخة احتياطية"), 'info'],
-  apps_create: [T("إضافة تطبيق"), 'pos'], apps_update: [T("تعديل تطبيق"), 'warn'], categories_create: [T("إضافة تصنيف"), 'pos'], categories_update: [T("تعديل تصنيف"), 'warn'],
+  apps_create: [T("إضافة تطبيق"), 'pos'], apps_update: [T("تعديل تطبيق"), 'warn'], app_fees_update: [T("تعديل رسوم شركة توصيل"), 'warn'], categories_create: [T("إضافة تصنيف"), 'pos'], categories_update: [T("تعديل تصنيف"), 'warn'],
   creditors_create: [T("إضافة دائن"), 'pos'], creditors_update: [T("تعديل دائن"), 'warn'], creditors_delete: [T("حذف دائن"), 'neg'],
   recurring_create: [T("إضافة مصروف دوري"), 'pos'], recurring_update: [T("تعديل مصروف دوري"), 'warn'], recurring_delete: [T("حذف مصروف دوري"), 'neg'],
   recurring_pay: [T("سداد مصروف دوري"), 'info'], recurring_skip: [T("تخطي مصروف دوري"), 'warn'],
@@ -1571,7 +1583,7 @@ async function dailyReport(box) {
         ${m.expenses_paid ? rl(T("مصروفات مدفوعة") + ' −', m.expenses_paid, { cls: 'minus' }) : ''}
         ${m.debt_payments ? rl(T("سداد ديون") + ' −', m.debt_payments, { cls: 'minus' }) : ''}
         ${m.withdrawals ? rl(T("مسحوبات المالك") + ' −', m.withdrawals, { cls: 'minus' }) : ''}
-        ${m.app_commission ? rl(T("عمولات التطبيقات") + ' −', m.app_commission, { cls: 'minus' }) : ''}
+        ${m.app_commission ? rl(T("عمولات ورسوم التطبيقات") + ' −', m.app_commission, { cls: 'minus' }) : ''}
         ${other ? rl(T("تمويل وإيداعات") + ' +', other, { cls: 'plus' }) : ''}
         ${m.adjustments ? rl(T("تسويات") + ' ±', m.adjustments) : ''}
         ${m.cash_diff ? rl(T("فروقات الجرد") + ' ±', m.cash_diff, { cls: m.cash_diff < 0 ? 'minus' : 'plus' }) : ''}
@@ -1639,7 +1651,7 @@ async function periodReport(box) {
       ${repCard('trendUp', T("المبيعات حسب القناة"), `${channelBar(m.sales.cash, m.sales.card, m.sales.apps)}
         ${rl(`<span class="lbl-ic">${icon('cash')}${T("نقدي")}</span>`, m.sales.cash)}${rl(`<span class="lbl-ic">${icon('card')}${T("بطاقة / شبكة")}</span>`, m.sales.card)}
         ${m.sales.byApp.filter(a => a.amount).map(a => rl(`<span class="lbl-ic">${icon('truck')}${esc(T(a.name))}</span>`, a.amount, { note: T("آجل"), cls: 'sub' })).join('')}
-        ${rl(T("رسوم البطاقة"), -m.card_fee, { cls: 'minus' })}${rl(T("عمولات التطبيقات (المُحصّلة)"), -m.app_commission, { cls: 'minus' })}`)}
+        ${rl(T("رسوم البطاقة"), -m.card_fee, { cls: 'minus' })}${rl(T("عمولات ورسوم التطبيقات"), -m.app_commission, { cls: 'minus' })}`)}
       ${repCard('wallet', T("رصيد الشركة"), `${rl(T("رصيد بداية الفترة"), d.start_balance)}${rl(T("صافي الحركة"), m.net_movement, { cls: m.net_movement < 0 ? 'minus' : 'plus' })}
         ${rl(T("سداد ديون"), m.debt_payments, { cls: 'muted-row' })}${rl(T("تمويل وديون جديدة"), m.loans, { cls: 'muted-row' })}
         ${rl(T("مسحوبات المالك"), m.withdrawals, { cls: 'muted-row' })}${rl(T("تحصيل من التطبيقات"), m.app_collected, { cls: 'muted-row' })}
@@ -1671,10 +1683,10 @@ VIEWS.finance = async (el) => {
   ${pageHead('wallet', T("التحصيل والديون"), '', fin ? `<button class="btn" data-t="withdrawal">${icon('arrowUp')}${T("مسحوبات المالك")}</button><button class="btn" data-t="owner_deposit">${icon('arrowDown')}${T("إيداع من المالك")}</button><button class="btn" data-t="adjustment">${icon('sliders')}${T("تسوية رصيد")}</button>` : '')}
   <div class="grid kpis">${kpi(T("رصيد الشركة"), d.balance, 'accent', '', 'wallet')}${kpi(T("آجل لدى التطبيقات"), d.receivables.total, '', '', 'truck')}${kpi(T("إجمالي الديون"), d.debts.total, 'warn', '', 'landmark')}${kpi(T("صافي المركز"), net, net < 0 ? 'neg' : 'pos', '', 'scale')}</div>
   <section class="card"><div class="card-head"><h3>${icon('truck')}${T("مستحقات تطبيقات التوصيل (آجل)")}</h3></div>
-    <div class="tbl-wrap"><table><thead><tr><th>${T("التطبيق")}</th><th>${T("رصيد افتتاحي")}</th><th>${T("مبيعات")}</th><th>${T("تم تحصيله")}</th><th>${T("المتبقي")}</th><th></th></tr></thead><tbody>
-    ${d.receivables.list.map(a => `<tr><td><b>${esc(T(a.name))}</b>${a.active ? '' : ` <span class="badge muted">${T("مخفي")}</span>`}</td><td class="n">${money(a.opening_receivable)}</td><td class="n">${money(a.sold)}</td><td class="n">${money(a.collected)}</td><td class="n"><b>${money(a.balance)}</b></td>
-      <td class="row-acts">${fin ? `<button class="btn sm soft" data-settle="${a.id}">${icon('download')}${T("تسجيل تحصيل")}</button>` : ''}</td></tr>`).join('')}
-    </tbody><tfoot><tr><td>${T("الإجمالي")}</td><td></td><td></td><td></td><td class="n">${money(d.receivables.total)}</td><td></td></tr></tfoot></table></div></section>
+    <div class="tbl-wrap"><table><thead><tr><th>${T("التطبيق")}</th><th>${T("رصيد افتتاحي")}</th><th>${T("مبيعات")}</th><th>${T("رسوم الشركة")}</th><th>${T("تم تحصيله")}</th><th>${T("المتبقي")}</th><th></th></tr></thead><tbody>
+    ${d.receivables.list.map(a => `<tr><td><b>${esc(T(a.name))}</b>${a.active ? '' : ` <span class="badge muted">${T("مخفي")}</span>`}<div class="small muted">${feeRule(a) ? `${T("الرسوم")}: ${feeRule(a)}` : T("بدون رسوم محددة")}</div></td><td class="n">${money(a.opening_receivable)}</td><td class="n">${money(a.sold)}</td><td class="n">${a.fees ? `<span class="neg-t">${money(a.fees)}</span>` : money(0)}</td><td class="n">${money(a.collected)}</td><td class="n"><b>${money(a.balance)}</b></td>
+      <td class="row-acts">${fin ? `<button class="btn sm soft" data-settle="${a.id}">${icon('download')}${T("تسجيل تحصيل")}</button>${a.balance > 0.004 ? `<button class="btn sm" data-feebook="${a.id}">${icon('minusCircle')}${T("ترحيل كرسوم")}</button>` : ''}` : ''}${can('settings_manage') ? `<button class="icon-btn" data-rates="${a.id}" title="${T("رسوم الشركة")}">${icon('sliders')}</button>` : ''}</td></tr>`).join('')}
+    </tbody><tfoot><tr><td>${T("الإجمالي")}</td><td></td><td></td><td class="n">${money(r2(d.receivables.list.reduce((t, a) => t + (a.fees || 0), 0)))}</td><td></td><td class="n">${money(d.receivables.total)}</td><td></td></tr></tfoot></table></div></section>
   <section class="card"><div class="card-head"><h3>${icon('landmark')}${T("الديون والدائنون")}</h3>${fin || can('settings_manage') ? `<button class="btn sm" id="bCred">${icon('plus')}${T("دائن جديد")}</button>` : ''}</div>
     ${d.debts.list.length ? `<div class="tbl-wrap"><table><thead><tr><th>${T("الدائن")}</th><th>${T("أصل الدين")}</th><th>${T("سُدّد")}</th><th>${T("المتبقي")}</th><th>${T("نسبة السداد")}</th><th></th></tr></thead><tbody>
     ${d.debts.list.map(c => { const orig = r2(c.opening_balance + c.added), pct = orig > 0 ? Math.min(100, Math.round(c.paid / orig * 100)) : 0;
@@ -1690,6 +1702,9 @@ VIEWS.finance = async (el) => {
   const cr = (id) => d.debts.list.find(c => c.id == id);
   $$('[data-t]', el).forEach(b => b.onclick = () => openTxModal({ types: [b.dataset.t], title: S.me.txTypes[b.dataset.t], onSaved: reload }));
   $$('[data-settle]', el).forEach(b => b.onclick = () => openTxModal({ types: ['app_settlement'], title: T("تحصيل من تطبيق توصيل"), preset: { app_id: b.dataset.settle }, onSaved: reload }));
+  const ap = (id) => d.receivables.list.find(a => a.id == id);
+  $$('[data-rates]', el).forEach(b => b.onclick = () => listItemModal('apps', S.meta.apps.find(a => a.id == b.dataset.rates), reload));
+  $$('[data-feebook]', el).forEach(b => b.onclick = () => bookAppFees(ap(b.dataset.feebook), reload));
   $$('[data-pay]', el).forEach(b => b.onclick = () => payDebt(cr(b.dataset.pay), 'debt_payment', reload));
   $$('[data-wo]', el).forEach(b => b.onclick = () => payDebt(cr(b.dataset.wo), 'debt_writeoff', reload));
   $$('[data-loan]', el).forEach(b => b.onclick = () => openTxModal({ types: ['loan'], title: T("دين / تمويل جديد"), preset: { creditor_id: b.dataset.loan }, onSaved: reload }));
@@ -1699,6 +1714,21 @@ VIEWS.finance = async (el) => {
 };
 
 // full or partial payment (or write-off) of one creditor's debt
+// what is left with a delivery company was its fees: book it (or part of it) as fees, nothing arrived
+function bookAppFees(a, after) {
+  const m = modal(`${T("ترحيل كرسوم")} — ${T(a.name)}`, `<form autocomplete="off">
+    <div class="summary-box"><div class="r"><span>${T("المتبقي لدى التطبيق")}</span>${M(a.balance)}</div></div>
+    <label class="big">${T("مبلغ الرسوم")}<input name="fee" type="number" step="0.01" min="0.01" max="${a.balance}" inputmode="decimal" required value="${a.balance}"></label>
+    <div class="fgrid"><label>${T("التاريخ")}<input type="date" name="date" value="${wd()}"></label>
+      <label>${T("ملاحظة")}<input name="description" value="${esc(T("رسوم شركة") + ' ' + T(a.name))}"></label></div>
+    <p class="hint">${icon('info')}<span>${T("يُنقص المتبقي لدى التطبيق بهذا المبلغ ويُسجّل كرسوم (مصروف) على المحل — لا يدخل الرصيد أي مبلغ. يظهر في «الحركات» ويمكن حذفه")}.</span></p>
+    <div class="mf"><button class="btn primary">${icon('check')}${T("تأكيد الترحيل")}</button><button type="button" class="btn" data-x>${T("إلغاء")}</button></div></form>`);
+  const f = $('form', m.el);
+  f.onsubmit = (e) => { e.preventDefault(); busy(e.submitter, async () => {
+    await bapi('/transactions', { method: 'POST', body: { type: 'app_settlement', app_id: a.id, amount: 0, fee: r2(f.fee.value), date: f.date.value, description: f.description.value } });
+    m.close(); toast(T("تم ترحيل المبلغ كرسوم"), 'ok'); after();
+  }); };
+}
 function payDebt(c, type, after) {
   const wo = type === 'debt_writeoff';
   const orig = r2(c.opening_balance + c.added), pct = orig > 0 ? Math.min(100, Math.round(c.paid / orig * 100)) : 0;
@@ -1779,7 +1809,8 @@ async function deleteCreditor(c, after) {
 
 /* ═════════════════════════ business settings ═════════════════════════ */
 const LIST_DEF = {
-  apps: { title: T("تطبيق توصيل"), fields: [['name', T("الاسم")], ['opening_receivable', T("رصيد آجل افتتاحي"), 'number']] },
+  apps: { title: T("تطبيق توصيل"), fields: [['name', T("الاسم")], ['opening_receivable', T("رصيد آجل افتتاحي"), 'number'], ['fee_per_order', T("رسوم الشركة: مبلغ عن كل طلب (ريال)"), 'fee'], ['fee_pct', T("رسوم الشركة: نسبة من مبيعات التطبيق %"), 'fee']],
+    note: T("رسوم شركة التوصيل منفصلة عن رسوم البطاقة (الشبكة). تُحسب عند كل إقفال من مبيعات التطبيق وعدد طلباته، وتُخصم من المتبقي لدى التطبيق. الأيام المُقفلة سابقاً لا تتغير. اتركها صفراً إن لم تكن هناك رسوم") },
   categories: { title: T("تصنيف"), fields: [['name', T("الاسم")], ['kind', T("النوع"), 'kind']] },
   creditors: { title: T("دائن / مورد آجل"), fields: [['name', T("الاسم")], ['opening_balance', T("الدين الافتتاحي (القائم حالياً)"), 'number']] },
 };
@@ -1787,7 +1818,8 @@ function listItemModal(key, item, after, preset = {}) {
   const D = LIST_DEF[key];
   const m = modal((item ? (T("تعديل") + " ") : (T("إضافة") + " ")) + D.title, `<form>${D.fields.map(([k, l, t]) => t === 'kind'
     ? `<label>${l}<select name="${k}">${opt([['purchase', T("مشتريات")], ['expense', T("مصروفات")]], item?.[k] || preset[k] || 'purchase', x => x)}</select></label>`
-    : `<label>${l}<input name="${k}" ${t === 'number' ? 'type="number" step="0.01"' : 'required'} value="${esc(item?.[k] ?? (t === 'number' ? 0 : ''))}"></label>`).join('')}
+    : `<label>${l}<input name="${k}" ${t === 'number' ? 'type="number" step="0.01"' : t === 'fee' ? 'type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"' : 'required'} value="${esc(item?.[k] ?? (t === 'number' ? 0 : ''))}"></label>`).join('')}
+    ${D.note ? `<p class="hint">${icon('info')}<span>${D.note}.</span></p>` : ''}
     ${item ? `<label class="check"><input type="checkbox" name="active" ${item.active ? 'checked' : ''}> ${T("ظاهر (غير مخفي)")}</label>` : ''}
     <div class="mf"><button class="btn primary">${T("حفظ")}</button></div></form>`);
   $('form', m.el).onsubmit = (e) => {
@@ -1908,7 +1940,7 @@ VIEWS.settings = async (el) => {
     <p class="hint">${T("الرصيد الافتتاحي")} = ${T("رصيد الشركة يوم بدء استخدام النظام (بدون الآجل لدى التطبيقات، فهو يُدخل لكل تطبيق على حدة)")}.</p></section>
   <section class="card" id="apps"><div class="card-head"><h3>${icon('truck')}${T("تطبيقات التوصيل")}</h3><button class="btn primary sm" data-add="apps">${icon('plus')}${T("إضافة تطبيق")}</button></div>
     <p class="muted small" style="margin:0 0 10px">${T("التطبيقات الظاهرة تظهر للكاشير في «إقفال اليوم». المخفي لا يظهر، لكن تبقى مبيعاته السابقة ومستحقاته محفوظة في التقارير")}.</p>
-    ${list('apps', S.meta.apps, [r => r.opening_receivable ? (T("آجل افتتاحي") + " ") + money(r.opening_receivable) : ''])}</section>
+    ${list('apps', S.meta.apps, [r => r.opening_receivable ? (T("آجل افتتاحي") + " ") + money(r.opening_receivable) : '', r => feeRule(r) ? `${T("رسوم الشركة")}: ${feeRule(r)}` : T("بدون رسوم")])}</section>
   <div class="grid two">
     <section class="card"><div class="card-head"><h3>${icon('landmark')}${T("الدائنون")}</h3><button class="btn sm" data-add="creditors">${icon('plus')}${T("إضافة")}</button></div>
       ${S.meta.creditors.length ? list('creditors', S.meta.creditors, [r => (T("افتتاحي") + " ") + money(r.opening_balance)]) : ("<p class=\"muted small\">" + T("لا يوجد") + "</p>")}</section>

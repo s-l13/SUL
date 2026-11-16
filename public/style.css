@@ -953,3 +953,8 @@ tr.mine-row td { background: var(--brand-soft); }
 .pw-eye { position: absolute; inset-inline-end: 4px; top: 50%; transform: translateY(-50%); background: none; border: 0; padding: 6px; color: var(--muted); cursor: pointer; display: flex; }
 .pw-eye:hover { color: var(--text); }
 .pw-eye .ic { width: 18px; height: 18px; }
+
+/* closing: each delivery app's sales with its optional order count */
+.fgrid.app-in { margin: 0; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); align-items: end; }
+.fgrid.app-in > label { min-width: 0; }
+.fgrid.app-in input { min-width: 0; width: 100%; }

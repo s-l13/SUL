@@ -506,9 +506,9 @@ async function recomputeShift(id) {
 // human-readable snapshots for the edits log
 async function shiftSnap(id) {
   const s = await db.get('SELECT * FROM shifts WHERE id = ?', id);
-  const apps = await db.all('SELECT a.name, sa.amount FROM shift_app_sales sa JOIN delivery_apps a ON a.id = sa.app_id WHERE sa.shift_id = ?', id);
+  const apps = await db.all('SELECT a.name, sa.amount, sa.orders_count, sa.fee FROM shift_app_sales sa JOIN delivery_apps a ON a.id = sa.app_id WHERE sa.shift_id = ?', id);
   return {
-    date: s.date, cash_sales: s.cash_sales, card_sales: s.card_sales, apps: Object.fromEntries(apps.map(a => [a.name, a.amount])),
+    date: s.date, cash_sales: s.cash_sales, card_sales: s.card_sales, apps: Object.fromEntries(apps.map(a => [a.name, a.orders_count || a.fee ? `${a.amount} (${a.orders_count || 0} طلب، رسوم ${a.fee})` : a.amount])),
     orders_count: s.orders_count, counted_cash: s.counted_at ? s.counted_cash : null, cash_with_staff: s.counted_at ? s.cash_with_staff : null,
     expected_cash: s.expected_cash, difference: s.counted_at ? s.difference : null, notes: s.notes || '',
     act_cash: s.act_cash ?? undefined, act_card: s.act_card ?? undefined,
@@ -551,29 +551,38 @@ function parseActual(x, biz) {
   return { act_cash: r2(c), act_card: r2(k) };
 }
 const saveActual = (id, a) => a === undefined ? null : db.run('UPDATE shifts SET act_cash = ?, act_card = ? WHERE id = ?', a ? a.act_cash : null, a ? a.act_card : null, id);
+const appFee = (app, amount, orders) => app ? r2((orders || 0) * (app.fee_per_order || 0) + (amount || 0) * (app.fee_pct || 0) / 100) : 0;
 async function saveAppSales(shiftId, apps) {
+  const old = await db.all('SELECT * FROM shift_app_sales WHERE shift_id = ?', shiftId);
+  const rates = await db.all('SELECT a.* FROM delivery_apps a JOIN shifts s ON s.business_id = a.business_id WHERE s.id = ?', shiftId);
   await db.run('DELETE FROM shift_app_sales WHERE shift_id = ?', shiftId);
-  for (const a of apps) if (a.amount > 0 || a.orders_count > 0)
-    await db.run('INSERT INTO shift_app_sales (shift_id, app_id, amount, orders_count) VALUES (?,?,?,?)', shiftId, a.app_id, r2(a.amount), a.orders_count);
+  for (const a of apps) if (a.amount > 0 || a.orders_count > 0) {
+    const o = old.find(x => x.app_id === a.app_id);
+    const fee = o && Math.abs(o.amount - r2(a.amount)) < 0.001 && o.orders_count === a.orders_count ? o.fee : appFee(rates.find(x => x.id === a.app_id), a.amount, a.orders_count);
+    await db.run('INSERT INTO shift_app_sales (shift_id, app_id, amount, orders_count, fee) VALUES (?,?,?,?,?)', shiftId, a.app_id, r2(a.amount), a.orders_count, r2(Math.min(fee, a.amount)));
+  }
 }
+// the delivery companies' fees booked at closing, for closed days up to a date
+const appFeesTo = async (bid, date) => (await db.get(`SELECT COALESCE(SUM(sa.fee),0) v FROM shift_app_sales sa JOIN shifts s ON s.id = sa.shift_id
+  WHERE s.business_id = ? AND s.status = 'closed' AND s.date <= ?`, bid, date)).v;
 
 async function balanceAsOf(b, date) {
   const s = (await db.get(`SELECT COALESCE(SUM(cash_sales + card_sales + app_sales - card_fee + difference),0) v
                            FROM shifts WHERE business_id = ? AND status = 'closed' AND date <= ?`, b.id, date)).v;
   const txs = await db.all(`SELECT type, payment_method, SUM(amount) amount, SUM(fee) fee FROM transactions
                             WHERE business_id = ? AND deleted_at IS NULL AND date <= ? GROUP BY type, payment_method`, b.id, date);
-  return r2(b.opening_balance + s + txs.reduce((t, x) => t + balanceEffect(x), 0));
+  return r2(b.opening_balance + s - await appFeesTo(b.id, date) + txs.reduce((t, x) => t + balanceEffect(x), 0));
 }
 async function receivablesAsOf(bid, date) {
-  const apps = await db.all('SELECT id, name, opening_receivable, active FROM delivery_apps WHERE business_id = ? ORDER BY id', bid);
-  const sales = await db.all(`SELECT sa.app_id, SUM(sa.amount) v FROM shift_app_sales sa JOIN shifts s ON s.id = sa.shift_id
+  const apps = await db.all('SELECT id, name, opening_receivable, active, fee_per_order, fee_pct FROM delivery_apps WHERE business_id = ? ORDER BY id', bid);
+  const sales = await db.all(`SELECT sa.app_id, SUM(sa.amount) v, SUM(sa.fee) f FROM shift_app_sales sa JOIN shifts s ON s.id = sa.shift_id
                               WHERE s.business_id = ? AND s.status = 'closed' AND s.date <= ? GROUP BY sa.app_id`, bid, date);
-  const coll = await db.all(`SELECT app_id, SUM(amount + fee) v FROM transactions WHERE business_id = ? AND type = 'app_settlement'
+  const coll = await db.all(`SELECT app_id, SUM(amount) v, SUM(fee) f FROM transactions WHERE business_id = ? AND type = 'app_settlement'
                              AND deleted_at IS NULL AND date <= ? GROUP BY app_id`, bid, date);
   const list = apps.map(a => {
-    const sold = sales.find(x => x.app_id === a.id)?.v || 0;
-    const collected = coll.find(x => x.app_id === a.id)?.v || 0;
-    return { ...a, sold: r2(sold), collected: r2(collected), balance: r2(a.opening_receivable + sold - collected) };
+    const s = sales.find(x => x.app_id === a.id) || {}, c = coll.find(x => x.app_id === a.id) || {};
+    const sold = s.v || 0, collected = c.v || 0, fees = (s.f || 0) + (c.f || 0);
+    return { ...a, sold: r2(sold), fees: r2(fees), fees_auto: r2(s.f || 0), collected: r2(collected), balance: r2(a.opening_receivable + sold - fees - collected) };
   });
   return { list, total: r2(list.reduce((t, a) => t + a.balance, 0)) };
 }
@@ -612,7 +621,7 @@ async function movement(b, from, to) {
     COALESCE(SUM(orders_count),0) orders, COALESCE(SUM(card_fee),0) card_fee, COALESCE(SUM(difference),0) diff,
     COALESCE(SUM(CASE WHEN difference < 0 THEN difference END),0) shortage, COALESCE(SUM(CASE WHEN difference > 0 THEN difference END),0) surplus,
     COUNT(*) shifts FROM shifts WHERE business_id = ? AND status = 'closed' AND date BETWEEN ? AND ?`, b.id, from, to);
-  const appRows = await db.all(`SELECT a.id, a.name, COALESCE(SUM(sa.amount),0) amount, COALESCE(SUM(sa.orders_count),0) orders
+  const appRows = await db.all(`SELECT a.id, a.name, COALESCE(SUM(sa.amount),0) amount, COALESCE(SUM(sa.orders_count),0) orders, COALESCE(SUM(sa.fee),0) fee
     FROM delivery_apps a LEFT JOIN shift_app_sales sa ON sa.app_id = a.id AND sa.shift_id IN
       (SELECT id FROM shifts WHERE business_id = ? AND status = 'closed' AND date BETWEEN ? AND ?)
     WHERE a.business_id = ? GROUP BY a.id, a.name ORDER BY a.id`, b.id, from, to, b.id);
@@ -621,7 +630,7 @@ async function movement(b, from, to) {
   const sum = (f) => r2(txs.filter(f).reduce((t, x) => t + x.amount, 0));
   const total = r2(sh.cash + sh.card + sh.apps);
   const m = {
-    sales: { cash: r2(sh.cash), card: r2(sh.card), apps: r2(sh.apps), total, orders: sh.orders, avg: sh.orders ? r2(total / sh.orders) : 0, byApp: appRows.map(a => ({ ...a, amount: r2(a.amount) })) },
+    sales: { cash: r2(sh.cash), card: r2(sh.card), apps: r2(sh.apps), total, orders: sh.orders, avg: sh.orders ? r2(total / sh.orders) : 0, byApp: appRows.map(a => ({ ...a, amount: r2(a.amount), fee: r2(a.fee) })) },
     shifts: sh.shifts,
     card_fee: r2(sh.card_fee),
     cash_diff: r2(sh.diff), shortage: r2(sh.shortage), surplus: r2(sh.surplus),
@@ -635,12 +644,13 @@ async function movement(b, from, to) {
     withdrawals: sum(x => x.type === 'withdrawal'),
     adjustments: sum(x => x.type === 'adjustment'),
     app_collected: sum(x => x.type === 'app_settlement'),
-    app_commission: r2(txs.filter(x => x.type === 'app_settlement').reduce((t, x) => t + x.fee, 0)),
+    app_fees_auto: r2(appRows.reduce((t, a) => t + a.fee, 0)), // booked at closing from each company's rates
+    app_commission: r2(txs.filter(x => x.type === 'app_settlement').reduce((t, x) => t + x.fee, 0) + appRows.reduce((t, a) => t + a.fee, 0)),
     cash_out: r2(-txs.reduce((t, x) => t + drawerEffect(x), 0)), // paid in cash from the drawer (net of money put in)
     card_paid: r2(txs.filter(x => x.payment_method === 'drawer').reduce((t, x) => t + (x.card_part || 0), 0)),
   };
   m.cash_net = r2(m.sales.cash - m.cash_out); // the day's cash to hand over (on top of the fixed float)
-  m.net_movement = r2(total - m.card_fee + m.cash_diff + txs.reduce((t, x) => t + balanceEffect(x), 0));
+  m.net_movement = r2(total - m.card_fee - m.app_fees_auto + m.cash_diff + txs.reduce((t, x) => t + balanceEffect(x), 0));
   // operating result (accrual): sales - fees - commissions - all purchases & expenses (incl. on credit)
   m.operating_result = r2(total - m.card_fee - m.app_commission - m.purchases_paid - m.purchases_credit - m.expenses_paid - m.expenses_credit);
   return m;
@@ -662,6 +672,8 @@ async function dailySeries(b, from, to) {
     if (t.type === 'app_settlement') d.fees += t.fee;
     d.cash_out = r2(d.cash_out - drawerEffect(t));
   }
+  for (const f of await db.all(`SELECT s.date, SUM(sa.fee) v FROM shift_app_sales sa JOIN shifts s ON s.id = sa.shift_id
+    WHERE s.business_id = ? AND s.status = 'closed' AND s.date BETWEEN ? AND ? GROUP BY s.date`, b.id, from, to)) day(f.date).fees += f.v || 0;
   for (const d of days.values()) { d.result = r2(d.sales - d.fees - d.purchases - d.expenses); d.cash_net = r2(d.cash - d.cash_out); delete d.fees; delete d.cash_out; }
   return days;
 }
@@ -739,7 +751,7 @@ biz.delete('/logo', need('settings_manage', 'fund_manage'), wrap(async (req) => 
 
 // simple lists: apps / categories / creditors
 const LISTS = {
-  apps: { table: 'delivery_apps', fields: ['name', 'opening_receivable', 'active'], perm: ['settings_manage'] },
+  apps: { table: 'delivery_apps', fields: ['name', 'opening_receivable', 'active', 'fee_per_order', 'fee_pct'], perm: ['settings_manage'] },
   categories: { table: 'categories', fields: ['name', 'kind', 'active'], perm: ['settings_manage'] },
   creditors: { table: 'creditors', fields: ['name', 'opening_balance', 'active'], perm: ['settings_manage', 'finance_manage'] },
 };
@@ -751,6 +763,8 @@ for (const [key, L] of Object.entries(LISTS)) {
       if (f === 'name') { v = String(v || '').trim().slice(0, 200); if (!v) bad('الاسم مطلوب'); }
       else if (f === 'kind') { if (!['purchase', 'expense'].includes(v)) bad('نوع التصنيف غير صحيح'); }
       else if (f === 'active') v = v === undefined ? 1 : (v ? 1 : 0);
+      else if (f === 'fee_per_order') { v = r2(num(v || 0)); if (!(v >= 0 && v <= 1000)) bad('رسوم الطلب الواحد غير صحيحة'); }
+      else if (f === 'fee_pct') { v = r2(num(v || 0)); if (!(v >= 0 && v <= 100)) bad('النسبة يجب أن تكون بين 0 و 100'); }
       else v = num(v) || 0;
       o[f] = v;
     }
@@ -832,7 +846,7 @@ biz.get('/summary', need('balance_view'), wrap(async (req) => {
 // ---------- shifts ----------
 async function shiftView(req, s) {
   const { txs, drawerNet } = await shiftDrawer(s);
-  const apps = await db.all(`SELECT a.id app_id, a.name, COALESCE(sa.amount,0) amount, COALESCE(sa.orders_count,0) orders_count FROM delivery_apps a
+  const apps = await db.all(`SELECT a.id app_id, a.name, COALESCE(sa.amount,0) amount, COALESCE(sa.orders_count,0) orders_count, COALESCE(sa.fee,0) fee, a.fee_per_order, a.fee_pct FROM delivery_apps a
     LEFT JOIN shift_app_sales sa ON sa.app_id = a.id AND sa.shift_id = ? WHERE a.business_id = ? AND (a.active = 1 OR sa.amount IS NOT NULL) ORDER BY a.id`, s.id, s.business_id);
   const names = await db.all('SELECT id, name FROM users');
   const nm = (id) => names.find(u => u.id === id)?.name || '';
@@ -1079,9 +1093,10 @@ async function validateTx(req, x, existing) {
   }
   const amount = items ? r2(items.reduce((t, it) => t + it.total, 0)) : num(x.amount);
   if (type === 'adjustment') { if (!Number.isFinite(amount) || amount === 0) bad('أدخل مبلغ التسوية (موجب للزيادة أو سالب للنقص)'); }
-  else if (!(amount > 0)) bad('المبلغ يجب أن يكون أكبر من صفر');
   const fee = type === 'app_settlement' ? num(x.fee || 0) : 0;
   if (!(fee >= 0)) bad('العمولة غير صحيحة');
+  if (type === 'app_settlement') { if (!(amount >= 0) || !(amount + fee > 0)) bad('أدخل المبلغ الواصل أو الرسوم'); }
+  else if (type !== 'adjustment' && !(amount > 0)) bad('المبلغ يجب أن يكون أكبر من صفر');
   // a purchase paid partly (or fully) by card / شبكة: only the cash part comes out of the drawer
   const card_part = method === 'drawer' && ['purchase', 'expense'].includes(type) ? r2(num(x.card_part || 0)) : 0;
   if (!(card_part >= 0) || card_part > r2(amount) + 0.001) bad('المبلغ المدفوع شبكة يجب أن يكون بين صفر وقيمة الفاتورة');
@@ -1107,6 +1122,12 @@ async function validateTx(req, x, existing) {
     const a = idOf(x.app_id) && await db.get('SELECT * FROM delivery_apps WHERE id = ? AND business_id = ?', idOf(x.app_id), req.biz.id);
     if (!a) bad('اختر التطبيق');
     app_id = a.id;
+    // booking fees only: they can't be more than what the company still owes us
+    if (!(amount > 0)) {
+      let remaining = (await receivablesAsOf(req.biz.id, MAX_DATE)).list.find(r => r.id === a.id)?.balance || 0;
+      if (existing && existing.type === 'app_settlement' && existing.app_id === a.id) remaining += existing.amount + existing.fee;
+      if (fee > r2(remaining) + 0.005) bad('الرسوم أكبر من المتبقي لدى التطبيق ({remaining})', { remaining: r2(remaining).toFixed(2) });
+    }
   }
 
   // date & shift
