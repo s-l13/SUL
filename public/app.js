@@ -693,6 +693,21 @@ async function deleteTx(t, after) {
   if (!await confirmBox(T("حذف حركة"), `<p>${T("حذف")} ${esc(S.me.txTypes[t.type])} ${T("بمبلغ")} <b>${money(t.amount)}</b>${T("؟")}<br><span class="muted small">${T("تبقى الحركة محفوظة في سجل المحذوفات")}.</span></p>`, T("حذف"), true)) return;
   try { await bapi('/transactions/' + t.id, { method: 'DELETE' }); toast(T("تم الحذف"), 'ok'); after && after(); } catch (e) { fail(e); }
 }
+const OUT_T = ['purchase', 'expense', 'debt_payment', 'withdrawal'];
+function daySums(txs) {
+  const outs = txs.filter(t => OUT_T.includes(t.type)), add = (l, f) => r2(l.reduce((a, t) => a + f(t), 0));
+  const drawer = outs.filter(t => t.payment_method === 'drawer');
+  const total = add(outs, t => t.amount), card = add(drawer, t => t.card_part || 0), cash = add(drawer, t => t.amount - (t.card_part || 0));
+  const company = add(outs.filter(t => t.payment_method === 'company'), t => t.amount), credit = add(outs.filter(t => t.payment_method === 'credit'), t => t.amount);
+  const cashIn = add(txs.filter(t => t.payment_method === 'drawer' && ['loan', 'owner_deposit'].includes(t.type)), t => t.amount);
+  const n = (f) => outs.filter(f).length;
+  return { total, cash, card, company, credit, other: r2(total - cash - card - company - credit), drawerNet: r2(cash - cashIn),
+    n: { cash: n(t => t.payment_method === 'drawer' && t.amount - (t.card_part || 0) > 0.004), card: n(t => t.payment_method === 'drawer' && (t.card_part || 0) > 0.004),
+      company: n(t => t.payment_method === 'company'), credit: n(t => t.payment_method === 'credit') } };
+}
+// what drops down under a day's total: cash from the drawer, card, company account, on credit
+const sumsPop = (x) => `<div class="cpop c-sums">${[[T("كاش من الدرج"), x.cash, x.n.cash], [T("شبكة"), x.card, x.n.card], [T("من حساب الشركة"), x.company, x.n.company], [T("آجل"), x.credit, x.n.credit], [T("أخرى"), x.other, 0]]
+  .filter(([l, v], i) => i < 2 || Math.abs(v) > 0.004).map(([l, v, n]) => `<div><span>${l}${n ? ` <small class="muted">(${n === 2 ? T("فاتورتان") : `${n} ${n > 2 && n < 11 ? T("فواتير") : T("فاتورة")}`})</small>` : ''}</span><b class="num">${money(v)}</b></div>`).join('')}</div>`;
 const payTag = (t) => !t.card_part ? '' : t.card_part >= t.amount ? ` <span class="badge muted">${icon('card')}${T("شبكة")}</span>` : ` <span class="badge muted">${T("كاش")} ${money(r2(t.amount - t.card_part))} + ${T("شبكة")} ${money(t.card_part)}</span>`;
 const txDesc = (t) => [t.category_name && T(t.category_name), t.supplier, t.app_name && T(t.app_name), t.creditor_name, t.description].filter(Boolean).map(esc).join(' · ') + payTag(t);
 const signedAmount = (t) => {
@@ -764,7 +779,9 @@ async function vCashier(el) {
   const counting = !!S.meta.business.cash_count, counts = counting && !!S.meta.business.cashier_counts;
   const float = sh ? sh.opening_float : (d.cash_float || 0);
   const apps = S.meta.apps.filter(a => a.active);
-  const out = sh ? sh.drawer_out : 0;
+  const sums = daySums(txs);
+  // the closing takes the drawer figure from the server; it must match the invoices listed here
+  const drawerOff = sh && Math.abs(sums.drawerNet - sh.drawer_out) > 0.009;
   el.innerHTML = `<div class="cashier">
     <div class="c-head">${logoImg(S.meta.business, 'c-logo')}<div class="c-name">${esc(T(S.meta.business.name))}</div>${S.meta.business.open_time ? `<div class="small muted" style="margin-bottom:6px;display:inline-flex;align-items:center;gap:5px">${icon('clock')}${T("الدوام")}${timeLabel(S.meta.business.open_time)} – ${timeLabel(S.meta.business.close_time)}</div>` : ''}${canPast ? `<label class="c-date c-day">${icon('calendar')}${T("يوم العمل")} <input type="date" id="cDay" max="${wd()}" value="${day || wd()}"></label>` : `<span class="c-date">${icon('calendar')}${T("يوم العمل")} <b>${fmtDate(sh?.date || d.work_date)}</b></span>`}</div>
     ${day ? `<div class="banner warn">${icon('history')}<span class="grow">${T("أنت تُدخل بيانات يوم سابق:")} <b>${fmtDate(day)}</b>${done ? ` — ${T("هذا اليوم مُقفل، ويمكنك تعديل أرقامه وإضافة مشتريات له")}` : ''}</span><button type="button" class="btn sm" id="cToday">${T("العودة لليوم الحالي")}</button></div>` : ''}
@@ -778,7 +795,9 @@ async function vCashier(el) {
       <p class="muted small" style="margin:-6px 0 12px">${BUY_MODES.find(m => m[0] === mode)[2]}</p>
       <form id="fBuy" autocomplete="off">${buyFormHTML(mode)}</form>
     </section>
-    <section class="card"><div class="card-head"><h3>${icon('receipt')}${day ? T("مشتريات هذا اليوم") : T("مشتريات اليوم")}</h3><span class="badge muted">${txs.length}</span><b>${M(out)}</b></div>
+    <section class="card"><div class="card-head"><h3>${icon('receipt')}${day ? T("مشتريات هذا اليوم") : T("مشتريات اليوم")}</h3><span class="badge muted">${txs.length}</span>${txs.length ? `<span class="cdrop"><button type="button" class="contrib-btn" id="bSums" title="${T("اضغط لعرض تفاصيل الكاش والشبكة")}"><b>${M(sums.total)}</b><span class="caret">▾</span></button></span>` : `<b>${M(0)}</b>`}</div>
+      <div id="sumsBox" hidden>${txs.length ? sumsPop(sums) : ''}</div>
+      ${drawerOff ? `<div class="banner warn">${icon('alert')}<span class="grow">${T("تنبيه: حساب الدرج")} ${money(sh.drawer_out)} ${T("لا يطابق الفواتير")} ${money(sums.drawerNet)} — ${T("أبلغ المسؤول")}</span></div>` : ''}
       ${txs.length ? txs.map(t => `<div class="c-item"><div class="ci-ic">${icon(t.items && t.items.length ? 'package' : 'receipt')}</div><div style="flex:1;min-width:0"><b>${M(t.amount)}</b>
         <div class="small muted">${esc(t.supplier || t.description || T("بدون اسم"))}${t.invoice_no ? (" · " + T("فاتورة") + " ") + esc(t.invoice_no) : ''} · ${timeOf(t.created_at)}${payTag(t)}</div>${itemsHTML(t.items)}</div>
         ${t.created_by === S.me.user.id || can('tx_edit') ? `<span style="white-space:nowrap"><button class="icon-btn" data-ed="${t.id}" title="${T("تعديل")}">${icon('edit')}</button><button class="icon-btn danger" data-del="${t.id}" title="${T("حذف")}">${icon('trash')}</button></span>` : ''}</div>`).join('') : ("<p class=\"muted center\">" + T("لم تُسجّل مشتريات اليوم بعد") + "</p>")}
@@ -805,6 +824,7 @@ async function vCashier(el) {
   $$('[name=bm]', el).forEach(r => r.onchange = () => { lsSet('buyMode', r.value); reload('buy'); });
   $$('[data-del]', el).forEach(b => b.onclick = () => deleteTx(txs.find(t => t.id == b.dataset.del), () => reload('buy')));
   $$('[data-ed]', el).forEach(b => b.onclick = () => openTxModal({ tx: txs.find(t => t.id == b.dataset.ed), onSaved: async () => { await loadMeta(); reload('buy'); } }));
+  const bs = $('#bSums', el); if (bs) bs.onclick = () => { const box = $('#sumsBox', el); box.hidden = !box.hidden; bs.parentElement.classList.toggle('open', !box.hidden); };
 
   const fb = $('#fBuy');
   if (fb) bindBuyForm(fb, mode, async () => { await loadMeta(); reload('buy'); }, day);
@@ -1245,7 +1265,7 @@ function closeOpenShift(s, after) {
   const counting = !!S.meta.business.cash_count;
   const m = modal(`${T("إقفال يوم")} ${fmtDate(s.date)}`, `<form autocomplete="off">
     <div class="summary-box"><div class="r"><span>${T("فتحه")}</span><span>${esc(s.opened_by_name || '')} — ${s.opened_at}</span></div>
-      <div class="r"><span>${T("الفواتير والحركات")}</span><b>${s.transactions.length}</b> · ${M(s.drawer_out)}</div></div>
+      <div class="r"><span>${T("الفواتير والحركات")}</span><span><b>${s.transactions.length}</b> · ${M(daySums(s.transactions).total)} <span class="muted small">(${T("كاش من الدرج")} ${money(s.drawer_out)})</span></span></div></div>
     <div class="fgrid">
       <label>${T("نقدي")}<input name="cash_sales" type="number" step="0.01" inputmode="decimal" required></label>
       <label>${T("بطاقة / شبكة")}<input name="card_sales" type="number" step="0.01" min="0" inputmode="decimal" required></label>
@@ -1277,7 +1297,7 @@ async function deleteShift(s, after) {
   const near = (await bapi('/shifts?' + new URLSearchParams({ from: addDays(s.date, -7), to: addDays(s.date, 7) }))).filter(x => x.id !== s.id);
   const n = s.transactions.length;
   const m = modal(`${T("حذف إقفال يوم")} ${fmtDate(s.date)}`, `<form>
-    <div class="summary-box"><div class="r"><span>${T("المبيعات")}</span>${M(shiftTotal(s))}</div><div class="r"><span>${T("الفواتير والحركات")}</span><b>${n}</b> · ${M(s.drawer_out)}</div></div>
+    <div class="summary-box"><div class="r"><span>${T("المبيعات")}</span>${M(shiftTotal(s))}</div><div class="r"><span>${T("الفواتير والحركات")}</span><span><b>${n}</b> · ${M(daySums(s.transactions).total)} <span class="muted small">(${T("كاش من الدرج")} ${money(s.drawer_out)})</span></span></div></div>
     ${n ? `<div class="sec-title">${T("ماذا نفعل بفواتير هذا اليوم؟")}</div>
       <label class="check"><input type="radio" name="what" value="move" ${near.length ? 'checked' : 'disabled'}> ${T("نقلها إلى إقفال يوم آخر")}</label>
       <select name="move_to" style="margin:6px 0 10px" ${near.length ? '' : 'disabled'}>${near.map(x => `<option value="${x.id}">${fmtDate(x.date)} — ${x.status === 'open' ? T("مفتوح") : money(shiftTotal(x))}</option>`).join('')}</select>

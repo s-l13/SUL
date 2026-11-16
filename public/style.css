@@ -942,3 +942,7 @@ tr.mine-row td { background: var(--brand-soft); }
 .cpop .sub { padding-inline-start: 10px; opacity: .7; font-size: 11px; }
 .cpop .lim { border-top: 1px dashed var(--border); margin-top: 3px; padding-top: 4px; }
 .kpi .v .cpop { font-size: 12px; }
+
+/* cashier: how the day's invoices were paid, under their total */
+.cpop.c-sums { margin: -4px 0 12px; font-size: 13px; }
+.cpop.c-sums > div { padding: 3px 0; }
