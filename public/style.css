@@ -946,3 +946,10 @@ tr.mine-row td { background: var(--brand-soft); }
 /* cashier: how the day's invoices were paid, under their total */
 .cpop.c-sums { margin: -4px 0 12px; font-size: 13px; }
 .cpop.c-sums > div { padding: 3px 0; }
+
+/* password boxes: an eye to show what was typed */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap > input { width: 100%; padding-inline-end: 42px; }
+.pw-eye { position: absolute; inset-inline-end: 4px; top: 50%; transform: translateY(-50%); background: none; border: 0; padding: 6px; color: var(--muted); cursor: pointer; display: flex; }
+.pw-eye:hover { color: var(--text); }
+.pw-eye .ic { width: 18px; height: 18px; }

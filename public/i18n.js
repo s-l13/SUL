@@ -956,6 +956,8 @@
     "من حساب الشركة": "From the company account",
     "أخرى": "Other",
     "مجموع الفواتير": "Invoices total",
+    "إظهار كلمة المرور": "Show password",
+    "إخفاء كلمة المرور": "Hide password",
     "فاتورتان": "2 invoices",
     "اضغط لعرض تفاصيل الكاش والشبكة": "Tap to see cash and card",
     "تنبيه: حساب الدرج": "Warning: the drawer figure",

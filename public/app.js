@@ -83,6 +83,20 @@ const ICONS = {
   bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
 };
 const FLIP = new Set(['chevL', 'chevR', 'logout', 'undo', 'trendUp']);
+function pwEyes(root) {
+  root.querySelectorAll('input[type=password]:not([data-eye])').forEach(i => {
+    i.dataset.eye = '1';
+    const w = document.createElement('span'); w.className = 'pw-wrap';
+    i.replaceWith(w); w.append(i);
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'pw-eye'; b.tabIndex = -1;
+    const set = (show) => { i.type = show ? 'text' : 'password'; b.innerHTML = icon(show ? 'eyeOff' : 'eye'); b.title = show ? T("إخفاء كلمة المرور") : T("إظهار كلمة المرور"); b.setAttribute('aria-label', b.title); };
+    b.onclick = (e) => { e.preventDefault(); const pos = i.selectionStart; set(i.type === 'password'); i.focus(); try { i.setSelectionRange(pos, pos); } catch { } };
+    set(false); w.append(b);
+  });
+}
+new MutationObserver(() => pwEyes(document)).observe(document.documentElement, { childList: true, subtree: true });
+// every form here is sent by the app itself; never let the browser send one as a page load (that would put typed figures or a password in the address bar)
+document.addEventListener('submit', (e) => e.preventDefault(), true);
 const icon = (n, cls = '') => `<svg class="ic ${FLIP.has(n) ? 'flip' : ''} ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ''}</svg>`;
 
 /* ═════════════════════════ appearance ═════════════════════════ */
@@ -779,7 +793,7 @@ async function vCashier(el) {
   const counting = !!S.meta.business.cash_count, counts = counting && !!S.meta.business.cashier_counts;
   const float = sh ? sh.opening_float : (d.cash_float || 0);
   const apps = S.meta.apps.filter(a => a.active);
-  const sums = daySums(txs);
+  const sums = daySums(txs), out = sh ? sh.drawer_out : 0;
   // the closing takes the drawer figure from the server; it must match the invoices listed here
   const drawerOff = sh && Math.abs(sums.drawerNet - sh.drawer_out) > 0.009;
   el.innerHTML = `<div class="cashier">
@@ -851,7 +865,7 @@ async function vCashier(el) {
         ${showCash && !counting ? `<div class="r"><span>+ ${T("العهدة الثابتة")}</span>${M(float)}</div><div class="r t"><span class="lbl-ic">${icon('wallet')}${T("إجمالي النقد في الدرج")}</span><b>${M(r2(float + x.cash - out))}</b></div>` : ''}</div>
       ${showCash ? reconLive(fc, { cash: x.cash, card: x.card, apps: x.appsT, float, out }) : ''}`;
   };
-  fc.addEventListener('input', draw); draw();
+  fc.addEventListener('input', draw);
   fc.onsubmit = async (e) => {
     e.preventDefault();
     const x = read();
@@ -877,6 +891,7 @@ async function vCashier(el) {
       reload(canBuy ? 'buy' : 'close');
     });
   };
+  draw();
 }
 
 // how a purchase was paid: cash from the drawer, by card (شبكة), or part of each
